@@ -1,5 +1,5 @@
 // opencode plugin: shared resource locks with a fair FIFO wait queue.
-// Options (all optional): dir, checkIntervalMs, staleSec, capacity { name: N }.
+// Options (all optional): dir, checkIntervalMs, staleSec, backfillMaxSec, capacity { name: N }.
 import { appendFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { Store, formatStatus, type Owner, type StoreOptions, type WaitResult } from "./store.ts"
@@ -67,7 +67,7 @@ export function createTools(store: Store, defaults: { cwd?: string } = {}) {
           resource: s('Resource name, e.g. "gpu" or "build".'),
           ...identity,
           purpose: s("What you use the resource for. It is shown in status and the log."),
-          max_hold_sec: n("Longest time you hold the lock. After it the lock is released automatically.", { exclusiveMinimum: 0 }),
+          max_hold_sec: n("Longest time you hold the lock. After it the lock is released automatically. A short value (at most 120 s by default) lets the ticket start early, while running holders drain for a waiting exclusive ticket.", { exclusiveMinimum: 0 }),
           exclusive: { type: "boolean", description: "Take all slots of a resource with capacity > 1 (e.g. a quiet host: no builds)." },
           preconditions: preconditionsSchema,
         },
@@ -238,6 +238,7 @@ export default {
       dir: o.dir as string | undefined,
       checkIntervalMs: o.checkIntervalMs as number | undefined,
       staleSec: o.staleSec as number | undefined,
+      backfillMaxSec: o.backfillMaxSec as number | undefined,
       capacity: o.capacity as StoreOptions["capacity"],
     })
     const tools = createTools(store, { cwd: ctx.location?.directory })

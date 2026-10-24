@@ -40,8 +40,8 @@ describe("FIFO", () => {
     expect((await s1.wait(c.ticket.id, 1, C)).status).toBe("granted")
   })
 
-  test("capacity N grants N; an exclusive ticket waits for all and blocks the ones behind it", () => {
-    const s = new Store({ dir: fresh(), capacity: { build: 2 } })
+  test("capacity N grants N; an exclusive ticket waits for all and blocks the ones behind it (no backfill)", () => {
+    const s = new Store({ dir: fresh(), capacity: { build: 2 }, backfillMaxSec: 0 })
     const w = [A, B].map((o) => acq(s, o, "build"))
     expect(w.map((r) => r.status)).toEqual(["granted", "granted"])
     const q = acq(s, C, "build", { exclusive: true })
@@ -61,6 +61,70 @@ describe("FIFO", () => {
     const b1 = acq(s, B)
     const b2 = acq(s, B)
     expect(b2.ticket.id).toBe(b1.ticket.id)
+  })
+})
+
+describe("backfill", () => {
+  const D = { sessionID: "ses_D", holder: "dave" }
+  test("a short build starts while builds drain for a waiting exclusive ticket; a long one does not", () => {
+    let now = 1_000_000
+    const s = new Store({ dir: fresh(), now: () => now, capacity: { build: 2 } })
+    const a = acq(s, A, "build", { max_hold_sec: 600 })
+    const q = acq(s, B, "build", { exclusive: true })
+    const long = acq(s, C, "build", { max_hold_sec: 300 })
+    const short = acq(s, D, "build", { max_hold_sec: 60 })
+    expect(q.status).toBe("waiting")
+    expect(long.status).toBe("waiting") // max_hold_sec over backfillMaxSec
+    expect(short.status).toBe("granted")
+    expect(s.ticket(short.ticket.id)!.backfill).toBe(1)
+    // The exclusive ticket still comes before the long one, once the slots are free.
+    s.release(a.ticket.id, A)
+    s.release(short.ticket.id, D)
+    expect(s.poll(q.ticket.id, B).status).toBe("granted")
+    expect(s.poll(long.ticket.id, C).status).toBe("waiting")
+  })
+
+  test("a backfilled job must end before every running holder must end", () => {
+    let now = 1_000_000
+    const s = new Store({ dir: fresh(), now: () => now, capacity: { build: 2 } })
+    acq(s, A, "build", { max_hold_sec: 100 })
+    acq(s, B, "build", { exclusive: true })
+    now += 50_000
+    expect(acq(s, C, "build", { max_hold_sec: 60 }).status).toBe("waiting") // would end at 110 s > 100 s
+    expect(acq(s, D, "build", { max_hold_sec: 40 }).status).toBe("granted")
+  })
+
+  test("no backfill during a quiet hold, with backfillMaxSec 0, or past a failing precondition", () => {
+    const s = new Store({ dir: fresh(), capacity: { build: 2 }, probe: { memAvailableKb: () => 0, processNames: () => [] } })
+    acq(s, A, "build", { exclusive: true })
+    expect(acq(s, B, "build", { max_hold_sec: 30 }).status).toBe("waiting") // quiet hold: no free slot
+    const off = new Store({ dir: fresh(), capacity: { build: 2 }, backfillMaxSec: 0 })
+    acq(off, A, "build", { max_hold_sec: 600 })
+    acq(off, B, "build", { exclusive: true })
+    expect(acq(off, C, "build", { max_hold_sec: 30 }).status).toBe("waiting")
+    const pre = new Store({ dir: fresh(), capacity: { build: 2 }, probe: { memAvailableKb: () => 0, processNames: () => [] } })
+    acq(pre, A, "build", { max_hold_sec: 600 })
+    acq(pre, B, "build", { exclusive: true })
+    expect(acq(pre, C, "build", { max_hold_sec: 30, preconditions: [{ kind: "mem_available", min_kb: 1 }] }).status).toBe("waiting")
+  })
+
+  test("a backfilled grant keeps its deadline: seeing it later does not extend it", () => {
+    let now = 1_000_000
+    const s = new Store({ dir: fresh(), now: () => now, capacity: { build: 2 } })
+    acq(s, A, "build", { max_hold_sec: 600 })
+    acq(s, B, "build", { exclusive: true })
+    const d = acq(s, D, "build", { max_hold_sec: 60 }) // granted at once and seen
+    expect(d.status).toBe("granted")
+    const c = acq(s, C, "build", { max_hold_sec: 60 })
+    expect(s.ticket(c.ticket.id)!.state).toBe("waiting") // the free slot is taken by d
+    s.release(d.ticket.id, D)
+    s.tick() // c is backfilled now, without c looking
+    expect(s.ticket(c.ticket.id)!.backfill).toBe(1)
+    now += 40_000
+    expect(s.poll(c.ticket.id, C).status).toBe("granted")
+    now += 21_000 // 61 s after the grant
+    s.tick()
+    expect(s.ticket(c.ticket.id)!.end_reason).toMatch(/max_hold_sec/)
   })
 })
 

@@ -7,6 +7,8 @@ export interface Holder {
   session: string | null
   purpose: string
   exclusive: boolean
+  /** Started out of FIFO order while holders drained for a waiting exclusive ticket. */
+  backfill: boolean
   heldSec: number
   maxHoldSec: number
   /** Seconds until max_hold_sec frees the lock. */

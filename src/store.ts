@@ -36,6 +36,8 @@ export interface Ticket {
   last_seen: number
   granted_at: number | null
   claimed: number
+  /** 1: granted out of FIFO order during a drain (see backfillMaxSec). Its hold time is fixed at the grant. */
+  backfill: number
   ended_at: number | null
 }
 
@@ -65,6 +67,12 @@ export interface StoreOptions {
   staleSec?: number
   /** Poll interval of wait(). */
   checkIntervalMs?: number
+  /**
+   * Backfill: while running holders drain for a waiting exclusive ticket, a later non-exclusive ticket may
+   * start if its max_hold_sec is at most this value and ends before the max-hold deadline of every running
+   * holder. 0 turns backfill off. Default 120.
+   */
+  backfillMaxSec?: number
   capacity?: Record<string, number>
 }
 
@@ -82,6 +90,7 @@ export class Store {
   readonly now: () => number
   readonly staleSec: number
   readonly checkIntervalMs: number
+  readonly backfillMaxSec: number
   private readonly logPath: string
 
   constructor(opts: StoreOptions = {}) {
@@ -92,6 +101,7 @@ export class Store {
     this.now = opts.now ?? Date.now
     this.staleSec = opts.staleSec ?? 900
     this.checkIntervalMs = opts.checkIntervalMs ?? 2000
+    this.backfillMaxSec = opts.backfillMaxSec ?? 120
     this.logPath = join(this.dir, "events.log")
     this.tx(() => {
       this.db.exec(`
@@ -102,7 +112,7 @@ export class Store {
           exclusive INTEGER NOT NULL DEFAULT 0, max_hold_sec INTEGER NOT NULL, preconditions TEXT NOT NULL,
           ok_since INTEGER, pending_reason TEXT, owner_pid INTEGER, owner_start TEXT, run_pid INTEGER, run_start TEXT, host TEXT NOT NULL,
           state TEXT NOT NULL, end_reason TEXT, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL,
-          granted_at INTEGER, claimed INTEGER NOT NULL DEFAULT 0, ended_at INTEGER);
+          granted_at INTEGER, claimed INTEGER NOT NULL DEFAULT 0, ended_at INTEGER, backfill INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS tickets_active ON tickets(resource, state, seq);
         CREATE TABLE IF NOT EXISTS ended_sessions (session_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS events (
@@ -110,6 +120,9 @@ export class Store {
           event TEXT NOT NULL, holder TEXT NOT NULL, nick TEXT, session_id TEXT, purpose TEXT,
           duration_ms INTEGER, detail TEXT);
       `)
+      // Stores made by an older version have no backfill column.
+      const cols = (this.db.prepare("PRAGMA table_info(tickets)").all() as { name: string }[]).map((c) => c.name)
+      if (!cols.includes("backfill")) this.db.exec("ALTER TABLE tickets ADD COLUMN backfill INTEGER NOT NULL DEFAULT 0")
       const ins = this.db.prepare("INSERT OR IGNORE INTO resources (name, capacity) VALUES (?, ?)")
       for (const [name, cap] of Object.entries({ ...DEFAULT_CAPACITY, ...opts.capacity })) ins.run(name, cap)
     })
@@ -320,7 +333,7 @@ export class Store {
         state = t.state === "held" ? "released" : "canceled"
       } else if (t.host === HOST && ownersDead(t)) {
         why = `owner process ${[t.owner_pid, t.run_pid].filter((p) => p !== null).join(" and ")} died`
-      } else if (t.state === "held" && t.claimed && t.granted_at !== null && now - t.granted_at > t.max_hold_sec * 1000) {
+      } else if (t.state === "held" && (t.claimed || t.backfill) && t.granted_at !== null && now - t.granted_at > t.max_hold_sec * 1000) {
         why = `max_hold_sec ${t.max_hold_sec} passed`
       } else if (t.state === "held" && !t.claimed && now - t.last_seen > this.staleSec * 1000) {
         // The owner may be between tool calls when the grant comes; it keeps the grant while it polls
@@ -352,6 +365,7 @@ export class Store {
         const need = t.exclusive ? cap : 1
         if (used + need > cap) {
           this.setPending(t, used >= cap ? null : "waiting for running holders to finish (exclusive)")
+          used += this.backfill(cap - used, held, waiting.slice(waiting.indexOf(t) + 1), now)
           break
         }
         const pre = JSON.parse(t.preconditions) as Precondition[]
@@ -375,6 +389,28 @@ export class Store {
     }
   }
 
+  /**
+   * The first waiting ticket needs more slots than are free (an exclusive ticket while builds drain).
+   * Start later short tickets in the free slots, but only if each one ends before every running holder
+   * must end. Then the first ticket does not start later than it could in the worst case, and a backfilled
+   * job delays it by at most backfillMaxSec when the holders end early. Returns the slots used.
+   */
+  private backfill(free: number, held: Ticket[], behind: Ticket[], now: number): number {
+    if (free <= 0 || this.backfillMaxSec <= 0 || held.length === 0) return 0
+    const deadline = Math.min(...held.map((h) => (h.granted_at ?? now) + h.max_hold_sec * 1000))
+    let used = 0
+    for (const t of behind) {
+      if (used >= free) break
+      if (t.exclusive || t.max_hold_sec > this.backfillMaxSec || now + t.max_hold_sec * 1000 > deadline) continue
+      const pre = JSON.parse(t.preconditions) as Precondition[]
+      if (pre.length && (requiredSec(pre) > 0 || checkNow(pre, this.probe) !== null)) continue
+      this.db.prepare("UPDATE tickets SET state = 'held', granted_at = ?, pending_reason = NULL, backfill = 1 WHERE id = ?").run(now, t.id)
+      this.log(t, "granted", now - t.created_at, `backfill: waited ${Math.round((now - t.created_at) / 1000)} s, must end in ${t.max_hold_sec} s`)
+      used++
+    }
+    return used
+  }
+
   private setPending(t: Ticket, reason: string | null): void {
     if (t.pending_reason !== reason) {
       this.db.prepare("UPDATE tickets SET pending_reason = ? WHERE id = ?").run(reason, t.id)
@@ -385,8 +421,8 @@ export class Store {
   private result(t: Ticket, markClaimed: boolean): WaitResult {
     if (t.state === "held") {
       if (markClaimed && !t.claimed) {
-        // The hold time starts when the owner sees the grant.
-        const now = this.now()
+        // The hold time starts when the owner sees the grant. A backfilled grant keeps its deadline.
+        const now = t.backfill ? (t.granted_at ?? this.now()) : this.now()
         this.db.prepare("UPDATE tickets SET claimed = 1, granted_at = ? WHERE id = ?").run(now, t.id)
         t = { ...t, claimed: 1, granted_at: now }
       }
@@ -443,7 +479,7 @@ export class Store {
     return names.map((name) => {
       const active = this.db.prepare("SELECT * FROM tickets WHERE resource = ? AND state IN ('waiting','held') ORDER BY seq").all(name) as Ticket[]
       const holders = active.filter((t) => t.state === "held").map((t) => ({
-        ticket: t.id, holder: t.holder, nick: t.nick, session: t.session_id, purpose: t.purpose, exclusive: !!t.exclusive,
+        ticket: t.id, holder: t.holder, nick: t.nick, session: t.session_id, purpose: t.purpose, exclusive: !!t.exclusive, backfill: !!t.backfill,
         held_sec: Math.round((now - (t.granted_at ?? now)) / 1000), max_hold_sec: t.max_hold_sec,
       }))
       const queue = active.filter((t) => t.state === "waiting").map((t, i) => ({
@@ -467,7 +503,7 @@ export function formatStatus(s: ReturnType<Store["status"]>): string {
   const out: string[] = []
   for (const r of s) {
     out.push(`${r.resource} (capacity ${r.capacity})`)
-    for (const h of r.holders) out.push(`  held  ${h.ticket} ${h.holder}${h.nick ? ` [${h.nick}]` : ""} ${h.held_sec}/${h.max_hold_sec} s${h.exclusive ? " exclusive" : ""}: ${h.purpose}`)
+    for (const h of r.holders) out.push(`  held  ${h.ticket} ${h.holder}${h.nick ? ` [${h.nick}]` : ""} ${h.held_sec}/${h.max_hold_sec} s${h.exclusive ? " exclusive" : ""}${h.backfill ? " backfill" : ""}: ${h.purpose}`)
     for (const q of r.queue) out.push(`  #${q.position}    ${q.ticket} ${q.holder}${q.nick ? ` [${q.nick}]` : ""} waited ${q.waited_sec} s, eta ${q.eta_sec} s${q.pending_reason ? ` (${q.pending_reason})` : ""}: ${q.purpose}`)
     if (!r.holders.length && !r.queue.length) out.push("  free")
   }

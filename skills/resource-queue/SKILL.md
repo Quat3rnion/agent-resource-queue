@@ -44,7 +44,7 @@ If you do not need the resource any more, call `resource_cancel({ ticket })`.
 ## Rules
 
 - **Always release.** Other agents wait for you. The lock is released automatically after `max_hold_sec`, but the time is lost for the others.
-- **Set a real `max_hold_sec`.** Use the expected time plus a margin. Do not use a very large value.
+- **Set a real `max_hold_sec`.** Use the expected time plus a margin. Do not use a very large value. A short job (`max_hold_sec` at most 120, or `resource_run` with at most 90) can start early by backfill while builds drain for a waiting quiet window. The job is stopped at its limit. With `build-gate.sh`, set `BUILD_MAX_HOLD=90` or less for this.
 - **Poll without a break.** A waiting ticket expires after 15 minutes without a poll. A grant that you did not see yet also expires after 15 minutes without a poll.
 - **One wait call is 600 seconds at most.** opencode stops a session that has no events for 60 minutes. So never wait in one call for a long time.
 - **Give `holder`, `nick` and `purpose`.** Other agents see them in `resource_status` and can contact you on IRC.

@@ -152,6 +152,7 @@ function readSnapshot(q, dir, now = Date.now(), host = hostInfo()) {
         session: t.session_id,
         purpose: t.purpose,
         exclusive: !!t.exclusive,
+        backfill: !!t.backfill,
         heldSec: sec(now - granted),
         maxHoldSec: t.max_hold_sec,
         leftSec: sec(granted + t.max_hold_sec * 1000 - now),

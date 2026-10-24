@@ -97,6 +97,7 @@ To set plugin options, wrap `setup` and give `ctx.options` (see `plugins/agent-c
 | --- | --- | --- |
 | `dir` | See the list above | Directory of the store. Do not use `/tmp`. The store refuses it. |
 | `checkIntervalMs` | `2000` | Time between two checks while a ticket waits. |
+| `backfillMaxSec` | `120` | The longest `max_hold_sec` of a ticket that can start by backfill. `0` turns backfill off. |
 | `staleSec` | `900` | A waiting ticket, or a granted ticket that its owner did not see yet, expires when nobody polls it for this time. |
 | `capacity` | `{ "gpu": 1, "build": 4 }` | Number of parallel holders for each resource. These values apply only when the resource is new in the store. A resource that is not in the store gets capacity 1. |
 
@@ -108,7 +109,12 @@ To change the capacity of a resource in the store, use `resource-queue capacity 
 - **Owner**: The opencode session that made the ticket. Tickets from the shell have no session. For these tickets, the holder name is the owner. Only the owner can wait on, release or cancel a ticket.
 - **Holder and nick**: Give a holder name, for example your agent name. Also give your IRC nick, so that other agents can find the holder. Subagents use their own session, so they own their own tickets.
 - **Capacity**: The number of tickets that can hold a resource at the same time. An `exclusive` ticket uses all slots.
-- **Strict FIFO**: The queue of a resource always grants the first waiting ticket first. A ticket never passes a ticket in front of it. Queues of different resources do not affect each other.
+- **Strict FIFO**: The queue of a resource always grants the first waiting ticket first. A ticket never passes a ticket in front of it, with one exception: backfill. Queues of different resources do not affect each other.
+- **Backfill**: An exclusive ticket waits until all running holders end. While they end, free slots can stay empty for a long time. In this time, a later non-exclusive ticket can start if both conditions are true:
+  - Its `max_hold_sec` is at most `backfillMaxSec` (default 120 seconds).
+  - It ends before each running holder must end (`granted_at + max_hold_sec`).
+
+  Thus the exclusive ticket never starts later than the latest time that the running holders allow. If the holders end early, a backfilled job can delay the exclusive ticket by at most `backfillMaxSec`. A backfilled job is stopped at its `max_hold_sec`, also if its owner sees the grant late. Backfill does not occur during an exclusive hold, and not for tickets with preconditions that do not pass now or that use `for_sec`.
 
 ## Tools
 
@@ -233,7 +239,7 @@ gpu-turn.sh <agent-name> <secs> build-gate.sh quiet <command...>
 ```
 
 - `gpu-turn.sh` uses the resource `gpu`. The ticket stays in the queue across calls with the same agent name. `GPU_QUEUE_WAIT` sets the wait for each call (default 900 seconds).
-- `build-gate.sh build` uses one slot of the resource `build`. `build-gate.sh quiet` uses all slots. New builds wait behind a quiet ticket. `BUILD_WAIT` and `QUIET_WAIT` set the wait (default 1200 and 600 seconds). `BUILD_MAX_HOLD` and `QUIET_MAX_HOLD` set the hold limit (default 7200 and 1800 seconds). Set `BUILD_GATE_NAME` to keep your place across calls.
+- `build-gate.sh build` uses one slot of the resource `build`. `build-gate.sh quiet` uses all slots. New builds wait behind a quiet ticket. `BUILD_WAIT` and `QUIET_WAIT` set the wait (default 1200 and 600 seconds). `BUILD_MAX_HOLD` and `QUIET_MAX_HOLD` set the hold limit (default 7200 and 1800 seconds). For a short build, set `BUILD_MAX_HOLD=90` or less: the build can then start by backfill while builds drain for a quiet window (the scripts add 30 seconds to the hold limit). Set `BUILD_GATE_NAME` to keep your place across calls.
 - Exit code 75: you do not have the lock yet. Call again. Exit code 124: the command ran out of time. Other exit codes come from your command.
 - The scripts find the CLI in this order: `$RESOURCE_QUEUE_CLI`, then `src/cli.ts` next to the real script (when the script is a symbolic link to the repository), then `resource-queue` on PATH.
 

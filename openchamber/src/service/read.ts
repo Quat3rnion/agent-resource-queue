@@ -28,6 +28,7 @@ interface Row {
   last_seen: number
   granted_at: number | null
   claimed: number
+  backfill?: number
 }
 
 const sec = (ms: number) => Math.max(0, Math.round(ms / 1000))
@@ -70,7 +71,7 @@ export function readSnapshot(q: Query, dir: string, now = Date.now(), host = hos
     const holders: Holder[] = mine.filter((t) => t.state === "held").map((t) => {
       const granted = t.granted_at ?? now
       return {
-        ticket: t.id, holder: t.holder, nick: t.nick, session: t.session_id, purpose: t.purpose, exclusive: !!t.exclusive,
+        ticket: t.id, holder: t.holder, nick: t.nick, session: t.session_id, purpose: t.purpose, exclusive: !!t.exclusive, backfill: !!t.backfill,
         heldSec: sec(now - granted), maxHoldSec: t.max_hold_sec, leftSec: sec(granted + t.max_hold_sec * 1000 - now),
         claimed: !!t.claimed, alive: alive(t), pids: [t.owner_pid, t.run_pid].filter((p): p is number => p !== null),
       }

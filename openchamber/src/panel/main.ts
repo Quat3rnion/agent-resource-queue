@@ -41,6 +41,7 @@ function holderRow(h: Holder): HTMLElement {
   const row = el("div", `row held${bad ? " bad" : ""}`)
   const badges: Node[] = []
   if (h.exclusive) badges.push(badge("exclusive", "info", "Uses all slots of the resource"))
+  if (h.backfill) badges.push(badge("backfill", "info", "Started early while holders drain for a waiting exclusive ticket. It must end before they must end."))
   if (!h.claimed) badges.push(badge("not seen", "warning", "Granted, but the owner has not seen the grant yet"))
   if (bad) badges.push(badge("owner dead", "error", `Processes ${h.pids.join(", ")} are gone. The next check frees the lock.`))
   const time = el("span", "time num", `${duration(h.heldSec)} · ${duration(h.leftSec)} left`)
