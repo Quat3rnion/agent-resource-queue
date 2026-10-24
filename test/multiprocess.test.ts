@@ -2,9 +2,10 @@
 import { afterAll, expect, test } from "bun:test"
 import { mkdirSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
+import { TEST_ROOT } from "./root.ts"
 import { Store } from "../src/store.ts"
 
-const ROOT = join(process.env.RQ_TEST_ROOT ?? "/arboretum/resource-queue-test", `mp-${process.pid}`)
+const ROOT = join(TEST_ROOT, `mp-${process.pid}`)
 const CLI = join(import.meta.dir, "../src/cli.ts")
 const BIN = join(import.meta.dir, "../bin")
 let n = 0
@@ -120,4 +121,16 @@ test("build-gate.sh quiet waits for builds, and new builds queue behind it", asy
   expect(s.status("build")[0]!.queue).toEqual([])
   await b3.exited
   s.close()
+}, 30_000)
+
+test("a wrapper installed as a symbolic link finds the CLI without RESOURCE_QUEUE_CLI; no flock unless one is set", async () => {
+  const dir = fresh()
+  const link = join(dir, "gpu-turn.sh")
+  await Bun.$`ln -s ${join(BIN, "gpu-turn.sh")} ${link}`
+  const { RESOURCE_QUEUE_CLI: _, GPU_FLOCK: __, ...rest } = env(dir, { XDG_CONFIG_HOME: join(dir, "no-config") })
+  const p = Bun.spawn([link, "linked", "30", "bash", "-c", "echo ok"], { env: rest, stdout: "pipe", stderr: "pipe" })
+  expect(await p.exited).toBe(0)
+  expect((await new Response(p.stdout).text()).trim()).toBe("ok")
+  const ev = new Store({ dir }).status("gpu")[0]!.recent.map((e) => e.event)
+  expect(ev).toContain("granted")
 }, 30_000)

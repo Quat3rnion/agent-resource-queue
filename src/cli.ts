@@ -5,6 +5,7 @@ import { parseArgs } from "node:util"
 import { Store, formatStatus, type Owner, type WaitResult } from "./store.ts"
 import { runHeld } from "./run.ts"
 import type { Precondition } from "./preconditions.ts"
+import { configPath, defaultDir, flockFor, loadConfig } from "./config.ts"
 
 const USAGE = `usage: resource-queue <command> [options]
   acquire  --resource R --holder H [--purpose P] [--max-hold S] [--exclusive] [--keep] [precondition options]
@@ -13,9 +14,13 @@ const USAGE = `usage: resource-queue <command> [options]
   cancel   --ticket T --holder H
   status   [--resource R] [--json]
   capacity --resource R --set N
-  run      --resource R --holder H --max-hold S [--wait S] [--exclusive] [--keep] [--purpose P] [precondition options] -- cmd...
-precondition options: --min-mem-kb KB [--mem-for-sec S]  --no-proc name,name [--proc-for-sec S]
-common: --dir DIR (default $RESOURCE_QUEUE_DIR or /arboretum/resource-queue) --nick N --session ID
+  run      --resource R --holder H --max-hold S [--wait S] [--exclusive] [--keep] [--purpose P] [--flock gpu|build] [precondition options] -- cmd...
+  config   show the store directory and the flocks that are used, and where they come from
+precondition options: --min-mem-kb KB [--mem-for-sec S]  --no-proc name,name [--proc-for-sec S]  --no-compiler [--proc-for-sec S]
+common: --dir DIR --nick N --session ID
+store directory: --dir, else $RESOURCE_QUEUE_DIR, else "dir" in ${configPath()}, else ~/.local/state/resource-queue
+--flock gpu|build: also run the command under that flock file ($GPU_FLOCK / $BUILD_FLOCK or "flocks" in the config),
+  shared for a build slot, exclusive otherwise. Nothing happens when no file is set.
 --keep: the waiting ticket outlives this process (call again with the same holder to keep your place).`
 
 const opts = {
@@ -24,6 +29,7 @@ const opts = {
   timeout: { type: "string" }, wait: { type: "string" }, json: { type: "boolean" }, set: { type: "string" },
   "min-mem-kb": { type: "string" }, "mem-for-sec": { type: "string" }, "no-proc": { type: "string" }, "proc-for-sec": { type: "string" },
   nick: { type: "string" }, session: { type: "string" }, quiet: { type: "boolean" },
+  "no-compiler": { type: "boolean" }, flock: { type: "string" },
 } as const
 
 function fail(msg: string, code = 2): never {
@@ -56,6 +62,7 @@ function preconditions(): Precondition[] {
   const pre: Precondition[] = []
   if (str("min-mem-kb")) pre.push({ kind: "mem_available", min_kb: numArg("min-mem-kb"), for_sec: numArg("mem-for-sec", 0) })
   if (str("no-proc")) pre.push({ kind: "no_process", names: need("no-proc").split(",").filter(Boolean), for_sec: numArg("proc-for-sec", 0) })
+  if (values["no-compiler"]) pre.push({ kind: "no_compiler", for_sec: numArg("proc-for-sec", 0) })
   return pre
 }
 
@@ -69,6 +76,12 @@ function describe(r: WaitResult): string {
 }
 const exitFor = (r: WaitResult) => (r.status === "granted" ? 0 : r.status === "waiting" ? 75 : 1)
 const print = (v: unknown) => process.stdout.write(JSON.stringify(v, null, 2) + "\n")
+
+if (command === "config") {
+  const cfg = loadConfig()
+  print({ config: configPath(), dir: str("dir") ?? defaultDir(cfg), env: process.env.RESOURCE_QUEUE_DIR ?? null, flocks: { gpu: flockFor("gpu", cfg), build: flockFor("build", cfg) } })
+  process.exit(0)
+}
 
 const store = new Store({ dir: str("dir") })
 
@@ -107,6 +120,12 @@ async function main(): Promise<number> {
     }
     case "run": {
       if (!cmd.length) fail("run needs a command after --")
+      const flockKind = str("flock")
+      if (flockKind !== undefined && flockKind !== "gpu" && flockKind !== "build") fail("--flock must be gpu or build")
+      const flockFile = flockKind ? flockFor(flockKind) : null
+      // Old callers that still use the flock file directly must not overlap with this command.
+      const shared = flockKind === "build" && !values.exclusive
+      const runCmd = flockFile ? ["flock", shared ? "-s" : "-x", "-E", "75", "-w", String(numArg("wait", 900)), flockFile, ...cmd] : cmd
       const owner = who()
       const maxHold = numArg("max-hold")
       const keep = !!values.keep
@@ -128,7 +147,7 @@ async function main(): Promise<number> {
       }
       say(`ticket ${r.ticket.id}: granted, running`)
       try {
-        const { code, timedOut } = await runHeld(store, r.ticket.id, owner, { cmd, maxHoldSec: maxHold, signal: ac.signal })
+        const { code, timedOut } = await runHeld(store, r.ticket.id, owner, { cmd: runCmd, maxHoldSec: maxHold, signal: ac.signal })
         if (timedOut) say(`command passed max hold time ${maxHold} s and was stopped`)
         return code
       } finally {

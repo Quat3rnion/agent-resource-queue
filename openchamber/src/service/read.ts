@@ -2,12 +2,10 @@
 // The caller gives the SQL access, so the service (node:sqlite) and the tests (bun:sqlite) share this code.
 import { hostname } from "node:os"
 import { readFileSync } from "node:fs"
-import { HOST, memAvailableKb, ownersDead, processNames } from "../../../src/proc.ts"
+import { HOST, memAvailableKb, ownersDead, runningCompilers } from "../../../src/proc.ts"
 import { STATS_WINDOW_SEC, type EventView, type Holder, type ResourceView, type Snapshot, type Waiter } from "../shared/snapshot.ts"
 
 export type Query = (sql: string, ...params: (string | number)[]) => Record<string, unknown>[]
-
-export const COMPILERS = ["hipcc", "clang", "clang++", "ld", "ld.lld", "cc1", "cc1plus", "gcc", "g++", "rustc", "nvcc"]
 
 interface Row {
   id: string
@@ -43,6 +41,7 @@ export function describePrecondition(p: Record<string, unknown>): string {
   const hold = typeof p.for_sec === "number" && p.for_sec > 0 ? ` for ${p.for_sec} s` : ""
   if (p.kind === "mem_available") return `MemAvailable >= ${Math.round(Number(p.min_kb) / 1024 / 1024 * 10) / 10} GB${hold}`
   if (p.kind === "no_process") return `no ${(p.names as string[]).join(", ")}${hold}`
+  if (p.kind === "no_compiler") return `no compiler${hold}`
   return JSON.stringify(p)
 }
 
@@ -56,8 +55,7 @@ function memTotalKb(): number | null {
 }
 
 export function hostInfo(): Snapshot["host"] {
-  const running = new Set(processNames())
-  return { name: hostname(), memAvailableKb: memAvailableKb(), memTotalKb: memTotalKb(), compilers: COMPILERS.filter((c) => running.has(c)) }
+  return { name: hostname(), memAvailableKb: memAvailableKb(), memTotalKb: memTotalKb(), compilers: runningCompilers() }
 }
 
 export function readSnapshot(q: Query, dir: string, now = Date.now(), host = hostInfo()): Snapshot {

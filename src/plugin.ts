@@ -27,7 +27,7 @@ const n = (description: string, extra: Json = {}) => ({ type: "number", descript
 const preconditionsSchema = {
   type: "array",
   description:
-    'Checks that must pass before the lock is granted. If one fails, the ticket keeps its place and is checked again. Items: {"kind":"mem_available","min_kb":N,"for_sec":S} or {"kind":"no_process","names":["hipcc","clang","ld"],"for_sec":S}. for_sec: the checks must pass without a break for S seconds.',
+    'Checks that must pass before the lock is granted. If one fails, the ticket keeps its place and is checked again. Items: {"kind":"mem_available","min_kb":N,"for_sec":S} or {"kind":"no_process","names":["name",...],"for_sec":S} or {"kind":"no_compiler","for_sec":S} (no compiler, assembler or linker runs; matches versioned names such as clang-22). for_sec: the checks must pass without a break for S seconds.',
   items: { type: "object" },
 }
 const identity = {

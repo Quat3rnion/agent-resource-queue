@@ -1,7 +1,7 @@
 // src/service/main.ts
 import http from "node:http";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join as join2 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 // src/service/read.ts
@@ -44,6 +44,49 @@ function processNames() {
   }
   return names;
 }
+function baseProcessName(comm) {
+  const n = comm.replace(/-\d+(\.\d+)*$/, "");
+  const m = /^(?:[a-z0-9_]+-){2,4}(gcc|g\+\+|cc|c\+\+|as|ld(?:\.[a-z]+)?|clang(?:\+\+)?)$/.exec(n);
+  return m ? m[1] : n;
+}
+function nameMatches(comm, names) {
+  const base = baseProcessName(comm);
+  for (const n of names)
+    if (n === comm || n === base)
+      return true;
+  return false;
+}
+var COMPILERS = [
+  "hipcc",
+  "nvcc",
+  "rustc",
+  "clang",
+  "clang++",
+  "clang-offload-b",
+  "cc1",
+  "cc1plus",
+  "cc1obj",
+  "cc",
+  "c++",
+  "gcc",
+  "g++",
+  "collect2",
+  "as",
+  "ld",
+  "ld.lld",
+  "ld.bfd",
+  "ld.gold",
+  "ld.mold",
+  "lld",
+  "mold"
+];
+function runningCompilers(names = processNames()) {
+  const counts = new Map;
+  for (const n of names)
+    if (nameMatches(n, COMPILERS))
+      counts.set(n, (counts.get(n) ?? 0) + 1);
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([n, c]) => c > 1 ? `${n} x${c}` : n);
+}
 function memAvailableKb() {
   try {
     const m = /^MemAvailable:\s+(\d+)\s+kB/m.exec(readFileSync("/proc/meminfo", "utf8"));
@@ -65,7 +108,6 @@ function ownersDead(t) {
 var STATS_WINDOW_SEC = 24 * 3600;
 
 // src/service/read.ts
-var COMPILERS = ["hipcc", "clang", "clang++", "ld", "ld.lld", "cc1", "cc1plus", "gcc", "g++", "rustc", "nvcc"];
 var sec = (ms) => Math.max(0, Math.round(ms / 1000));
 function alive(t) {
   if (t.host !== HOST || t.owner_pid === null && t.run_pid === null)
@@ -78,6 +120,8 @@ function describePrecondition(p) {
     return `MemAvailable >= ${Math.round(Number(p.min_kb) / 1024 / 1024 * 10) / 10} GB${hold}`;
   if (p.kind === "no_process")
     return `no ${p.names.join(", ")}${hold}`;
+  if (p.kind === "no_compiler")
+    return `no compiler${hold}`;
   return JSON.stringify(p);
 }
 function memTotalKb() {
@@ -89,8 +133,7 @@ function memTotalKb() {
   }
 }
 function hostInfo() {
-  const running = new Set(processNames());
-  return { name: hostname2(), memAvailableKb: memAvailableKb(), memTotalKb: memTotalKb(), compilers: COMPILERS.filter((c) => running.has(c)) };
+  return { name: hostname2(), memAvailableKb: memAvailableKb(), memTotalKb: memTotalKb(), compilers: runningCompilers() };
 }
 function readSnapshot(q, dir, now = Date.now(), host = hostInfo()) {
   const caps = new Map(q("SELECT name, capacity FROM resources").map((r) => [r.name, r.capacity]));
@@ -172,8 +215,39 @@ function readSnapshot(q, dir, now = Date.now(), host = hostInfo()) {
   return { at: now, store: { dir, ok: true, error: null }, host, resources, recent };
 }
 
+// ../src/config.ts
+import { readFileSync as readFileSync3 } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+var home = () => process.env.HOME || homedir();
+var expand = (p) => p === "~" ? home() : p.startsWith("~/") ? join(home(), p.slice(2)) : resolve(p);
+function configPath() {
+  return join(process.env.XDG_CONFIG_HOME || join(home(), ".config"), "resource-queue", "config.json");
+}
+function loadConfig(path = configPath()) {
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync3(path, "utf8"));
+  } catch (e) {
+    if (e.code === "ENOENT")
+      return {};
+    throw new Error(`resource-queue: cannot read ${path}: ${e.message}`);
+  }
+  const c = raw ?? {};
+  const f = c.flocks ?? {};
+  const str = (v) => typeof v === "string" && v.trim() ? expand(v.trim()) : undefined;
+  return { dir: str(c.dir), flocks: { gpu: str(f.gpu), build: str(f.build) } };
+}
+function defaultDir(config = loadConfig()) {
+  const env = process.env.RESOURCE_QUEUE_DIR?.trim();
+  if (env)
+    return expand(env);
+  if (config.dir)
+    return config.dir;
+  return join(process.env.XDG_STATE_HOME || join(home(), ".local", "state"), "resource-queue");
+}
+
 // src/service/main.ts
-var DEFAULT_DIR = "/arboretum/resource-queue";
 var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 var token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
 if (!port || !token) {
@@ -188,7 +262,7 @@ function close() {
   open = null;
 }
 function snapshot(dir) {
-  const file = join(dir, "queue.sqlite");
+  const file = join2(dir, "queue.sqlite");
   const empty = (error) => ({ at: Date.now(), store: { dir, ok: false, error }, host: hostInfo(), resources: [], recent: [] });
   if (!existsSync(file)) {
     close();
@@ -221,7 +295,12 @@ var server = http.createServer((req, res) => {
     return json(res, 200, { ok: true });
   if (req.method !== "GET" || url.pathname !== "/snapshot")
     return json(res, 404, { error: "not-found" });
-  const dir = url.searchParams.get("dir") || DEFAULT_DIR;
+  let dir;
+  try {
+    dir = url.searchParams.get("dir") || defaultDir();
+  } catch (e) {
+    return json(res, 200, { at: Date.now(), store: { dir: "", ok: false, error: e.message }, host: hostInfo(), resources: [], recent: [] });
+  }
   if (!dir.startsWith("/") || dir.includes(".."))
     return json(res, 400, { error: "bad-dir" });
   json(res, 200, snapshot(dir));
@@ -234,6 +313,3 @@ var shutdown = () => {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 server.listen(port, "127.0.0.1");
-export {
-  DEFAULT_DIR
-};

@@ -1,10 +1,11 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
+import { TEST_ROOT } from "./root.ts"
 import { Store } from "../src/store.ts"
 import type { Probe } from "../src/preconditions.ts"
 
-const ROOT = join(process.env.RQ_TEST_ROOT ?? "/arboretum/resource-queue-test", `unit-${process.pid}`)
+const ROOT = join(TEST_ROOT, `unit-${process.pid}`)
 let n = 0
 const fresh = () => {
   const dir = join(ROOT, String(n++))

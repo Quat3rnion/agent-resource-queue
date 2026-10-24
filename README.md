@@ -13,67 +13,89 @@ Agents: follow [INSTALL.md](INSTALL.md). It has the same steps, with a check aft
 - Linux. The store reads `/proc` to check processes and memory.
 - Bun 1.1 or newer.
 - opencode v2 (tested with 2.0.32 and 2.1.3).
-- `flock` (util-linux). The shell scripts use it.
-- A directory for the store that all agents can write to. The default is `/arboretum/resource-queue`.
+- `flock` (util-linux), only if you use migration flocks (see [Configuration](#configuration)).
 
 ### Steps
+
+In these steps, `$REPO` is the directory of the repository, for example `~/src/agent-resource-queue`.
 
 1. Get the source:
 
    ```sh
-   git clone git@git.lumina.software:quaternion/agent-resource-guarding.git ~/Projects/agent-resource-guarding
+   git clone https://github.com/Quat3rnion/agent-resource-queue.git "$REPO"
    ```
 
 2. Run the tests:
 
    ```sh
-   cd ~/Projects/agent-resource-guarding
-   mkdir -p /arboretum/resource-queue-test
-   TMPDIR=/arboretum/resource-queue-test bun test
+   cd "$REPO" && bun test
    ```
 
-3. Install the plugin. Make the file `~/.config/opencode/plugins/resource-queue.ts` with this content:
+3. Put the CLI on your PATH as the command `resource-queue`:
+
+   ```sh
+   mkdir -p ~/.local/bin && ln -sfn "$REPO/src/cli.ts" ~/.local/bin/resource-queue
+   ```
+
+   `~/.local/bin` must be in `PATH`.
+
+4. Install the plugin. Make the file `~/.config/opencode/plugins/resource-queue.ts`. Replace `$REPO` with the full path:
 
    ```ts
-   import base from "/home/<user>/Projects/agent-resource-guarding/src/plugin.ts"
+   import base from "$REPO/src/plugin.ts"
    export default base
    ```
 
-4. Install the agent skill. The skill tells agents when and how to use the locks:
+5. Install the agent skill. The skill tells agents when and how to use the locks:
 
    ```sh
-   ln -sfn ~/Projects/agent-resource-guarding/skills/resource-queue ~/.config/opencode/skills/resource-queue
+   ln -sfn "$REPO/skills/resource-queue" ~/.config/opencode/skills/resource-queue
    ```
 
-5. Optional: install the shell scripts. Keep a backup of the old scripts. Replace each file with `mv`, so that scripts that run now continue without errors:
+6. Optional: install the shell scripts. Install them as symbolic links, so that they find the CLI in the repository:
 
    ```sh
-   cd /arboretum/gpu-queue
-   for f in gpu-turn.sh build-gate.sh; do
-     [ -e $f.orig ] || cp -a $f $f.orig
-     install -m 775 ~/Projects/agent-resource-guarding/bin/$f .$f.new && mv -f .$f.new $f
-   done
+   mkdir -p ~/.local/bin
+   for f in gpu-turn.sh build-gate.sh; do ln -sfn "$REPO/bin/$f" ~/.local/bin/$f; done
    ```
 
-   The old queue file `/arboretum/gpu-queue/queue` is not used any more. See [INSTALL.md](INSTALL.md), step 6, to move waiting entries to the new store.
+   If you replace old scripts with the same names, see [Migrate from flock scripts](#migrate-from-flock-scripts).
 
-6. Restart the opencode server. The plugin loads when the server starts.
+7. Optional: choose the store directory (see [Configuration](#configuration)). All users of the queue must use the same directory.
 
-7. Make sure that it works:
+8. Restart the opencode server. The plugin loads when the server starts.
+
+9. Make sure that it works:
 
    ```sh
-   bun ~/Projects/agent-resource-guarding/src/cli.ts status
+   resource-queue config
+   resource-queue status
    ```
 
    In an opencode session, the tools `resource_acquire`, `resource_wait`, `resource_release`, `resource_cancel`, `resource_status` and `resource_run` are available.
 
 ### Configuration
 
-To set options, wrap `setup` and give `ctx.options` (see `plugins/agent-comms.ts` for an example). The options are:
+The plugin, the CLI, the shell scripts and the OpenChamber extension find the store in the same way. The first item that is set is used:
+
+1. An explicit value: the plugin option `dir`, the CLI option `--dir`, or the Store field in the OpenChamber panel.
+2. The environment variable `RESOURCE_QUEUE_DIR`.
+3. `"dir"` in the config file `~/.config/resource-queue/config.json` (or `$XDG_CONFIG_HOME/resource-queue/config.json`).
+4. `~/.local/state/resource-queue` (or `$XDG_STATE_HOME/resource-queue`).
+
+Use the config file when processes do not get the same environment, for example the opencode server and the OpenChamber service. Example:
+
+```json
+{ "dir": "/srv/resource-queue", "flocks": { "gpu": "/var/lock/gpu-tests.lock", "build": "/srv/gpu-queue/build.lock" } }
+```
+
+`flocks` is optional. See [Migrate from flock scripts](#migrate-from-flock-scripts). The command `resource-queue config` shows the values that are used.
+
+To set plugin options, wrap `setup` and give `ctx.options` (see `plugins/agent-comms.ts` for an example). The options are:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `dir` | `$RESOURCE_QUEUE_DIR` or `/arboretum/resource-queue` | Directory of the store. Do not use `/tmp`. The store refuses it. |
+| `dir` | See the list above | Directory of the store. Do not use `/tmp`. The store refuses it. |
 | `checkIntervalMs` | `2000` | Time between two checks while a ticket waits. |
 | `staleSec` | `900` | A waiting ticket expires when nobody polls it for this time. |
 | `claimSec` | `300` | A granted ticket expires when its owner does not see the grant in this time. |
@@ -155,7 +177,8 @@ A precondition is a check of the host. The store checks the preconditions of the
 | Kind | Fields | Passes when |
 | --- | --- | --- |
 | `mem_available` | `min_kb`, `for_sec` | `MemAvailable` in `/proc/meminfo` is at least `min_kb`. |
-| `no_process` | `names`, `for_sec` | No process has one of these names (`/proc/<pid>/comm`). |
+| `no_process` | `names`, `for_sec` | No process has one of these names (`/proc/<pid>/comm`). A name also matches the same name with a version or a target prefix: `clang` matches `clang-22`, `gcc` matches `x86_64-linux-gnu-gcc-13`. |
+| `no_compiler` | `for_sec` | No compiler, assembler or linker runs. The list is `COMPILERS` in `src/proc.ts` (for example `hipcc`, `clang`, `cc1plus`, `gcc`, `rustc`, `ld`, `ld.lld`). The same name rule applies. |
 
 `for_sec` is optional. All preconditions of the ticket must then pass at each poll for this number of seconds without a break. A failure starts the count again.
 
@@ -164,7 +187,7 @@ Example: at least 8 GB available for 60 seconds, and no compiler is running:
 ```json
 [
   { "kind": "mem_available", "min_kb": 8000000, "for_sec": 60 },
-  { "kind": "no_process", "names": ["hipcc", "clang", "ld"] }
+  { "kind": "no_compiler" }
 ]
 ```
 
@@ -201,7 +224,7 @@ Exit codes: `0` granted or done, `75` not granted yet (call again), `124` the co
 
 ## Shell scripts
 
-`bin/gpu-turn.sh` and `bin/build-gate.sh` replace the old scripts in `/arboretum/gpu-queue`. They use the same store as the plugin, so shell users and plugin users share one queue. The usage and the exit codes did not change.
+`bin/gpu-turn.sh` and `bin/build-gate.sh` give the queue to shell users. They use the same store as the plugin, so shell users and plugin users share one queue.
 
 ```sh
 gpu-turn.sh <agent-name> <max-turn-seconds> <command...>
@@ -210,15 +233,26 @@ build-gate.sh quiet <command...>
 gpu-turn.sh <agent-name> <secs> build-gate.sh quiet <command...>
 ```
 
-- `gpu-turn.sh` uses the resource `gpu`. The ticket stays in the queue across calls with the same agent name. `GPU_QUEUE_WAIT` sets the wait for each call (default 900 seconds). The command also runs under `flock` on `/arboretum/rdna-gpu-tests.lock` (set `GPU_FLOCK` to change it), for tools that use this lock directly.
-- `build-gate.sh build` uses one slot of the resource `build`. `build-gate.sh quiet` uses all slots. New builds wait behind a quiet ticket. `BUILD_WAIT` and `QUIET_WAIT` set the wait (default 1200 and 600 seconds). `BUILD_MAX_HOLD` and `QUIET_MAX_HOLD` set the hold limit (default 7200 and 1800 seconds). Set `BUILD_GATE_NAME` to keep your place across calls. The command also runs under the old `flock` on `/arboretum/gpu-queue/build.lock` (shared for `build`, exclusive for `quiet`; set `BUILD_FLOCK` to change it). Thus old scripts that still run during the migration and the new scripts do not overlap.
+- `gpu-turn.sh` uses the resource `gpu`. The ticket stays in the queue across calls with the same agent name. `GPU_QUEUE_WAIT` sets the wait for each call (default 900 seconds).
+- `build-gate.sh build` uses one slot of the resource `build`. `build-gate.sh quiet` uses all slots. New builds wait behind a quiet ticket. `BUILD_WAIT` and `QUIET_WAIT` set the wait (default 1200 and 600 seconds). `BUILD_MAX_HOLD` and `QUIET_MAX_HOLD` set the hold limit (default 7200 and 1800 seconds). Set `BUILD_GATE_NAME` to keep your place across calls.
+- Exit code 75: you do not have the lock yet. Call again. Exit code 124: the command ran out of time. Other exit codes come from your command.
+- The scripts find the CLI in this order: `$RESOURCE_QUEUE_CLI`, then `src/cli.ts` next to the real script (when the script is a symbolic link to the repository), then `resource-queue` on PATH.
 
-Differences from the old scripts:
+### Migrate from flock scripts
 
-- Builds have a limit of 4 parallel builds (the capacity of `build`). The old script had no limit.
-- Builds and quiet windows now have a hold limit.
-- A waiting `gpu-turn.sh` ticket expires after 15 minutes without a poll. The old limit was 20 minutes.
-- The scripts find the CLI at `$RESOURCE_QUEUE_CLI`, or else at `~/Projects/agent-resource-guarding/src/cli.ts`.
+Older scripts with these names used plain `flock` files. During a migration, old processes can still hold these files. To prevent overlap, set the files in `flocks` in the config file (or in `GPU_FLOCK` and `BUILD_FLOCK`). The new scripts then also take these files: exclusive for `gpu-turn.sh` and `build-gate.sh quiet`, shared for `build-gate.sh build`. An empty variable turns a flock off. When no old process is left, remove `flocks`.
+
+To replace a script that other agents use now, keep a backup and replace the file with an atomic rename. A script that runs now then continues with its old file:
+
+```sh
+cd <scripts directory>
+for f in gpu-turn.sh build-gate.sh; do
+  [ -e $f.orig ] || cp -a $f $f.orig
+  ln -sfn "$REPO/bin/$f" .$f.new && mv -T .$f.new $f
+done
+```
+
+The new scripts do not read the queue file of the old `gpu-turn.sh`. See [INSTALL.md](INSTALL.md), step 6, to move waiting entries to the new store.
 
 ## OpenChamber extension
 
@@ -231,11 +265,11 @@ The directory `openchamber/` is an OpenChamber extension. It shows the state of 
   - The panel also shows the available memory, the compilers that run now, the counts and the mean wait and hold times of the last 24 hours, and the last 30 queue events.
 - **Work Status section "Resource locks"**: One line for each resource with the holder and the number of waiting tickets.
 
-The extension has a small local service. The service reads the store in read-only mode with the `node:sqlite` module of OpenChamber's Node runtime (Node 22.13 or newer). It does not change the queue. The default store directory is `/arboretum/resource-queue`. To use a different directory, write it in the Store field at the bottom of the panel.
+The extension has a small local service. The service reads the store in read-only mode with the `node:sqlite` module of OpenChamber's Node runtime (Node 22.13 or newer). It does not change the queue. The service finds the store as described in [Configuration](#configuration). OpenChamber does not give its environment to the service, so use the config file, or write the directory in the Store field at the bottom of the panel.
 
 ### Install the extension
 
-1. In OpenChamber, open Settings → Extensions, and add the folder `~/Projects/agent-resource-guarding/openchamber`. Or use the API: `curl -X POST localhost:<port>/api/guests -H 'content-type: application/json' -d '{"path":"<full path of openchamber/>"}'`.
+1. In OpenChamber, open Settings → Extensions, and add the folder `$REPO/openchamber`. Or use the API: `curl -X POST localhost:<port>/api/guests -H 'content-type: application/json' -d '{"path":"<full path of openchamber/>"}'`.
 2. Allow the local service of Resource Queue in Settings → Extensions.
 
 The built files `panel/main.js`, `status/main.js` and `service/main.js` are in the repository, because OpenChamber does not build extensions. After you change a file in `openchamber/src/`, build and test again:
@@ -250,12 +284,12 @@ bun run typecheck
 
 ## Agent skill
 
-`skills/resource-queue/SKILL.md` tells agents how to use the tools and the scripts. Install step 4 links it into the opencode skills directory.
+`skills/resource-queue/SKILL.md` tells agents how to use the tools and the scripts. Install step 5 links it into the opencode skills directory.
 
 ## Tests
 
 ```sh
-TMPDIR=/arboretum/resource-queue-test bun test
+bun test
 ```
 
-The tests put their stores under `/arboretum/resource-queue-test` (set `RQ_TEST_ROOT` to change it). The tests cover FIFO grants between two sessions and between processes, recovery from a crashed holder in one check interval, preconditions that never pass, capacity, ownership, and many processes that use the store at the same time.
+The tests put their stores under `~/.cache/resource-queue-test` (set `RQ_TEST_ROOT` to change it). The store refuses `/tmp`, so do not set `RQ_TEST_ROOT` to a directory there. The tests cover FIFO grants between two sessions and between processes, recovery from a crashed holder in one check interval, preconditions that never pass, capacity, ownership, and many processes that use the store at the same time.

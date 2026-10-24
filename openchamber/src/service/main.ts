@@ -5,9 +5,8 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { hostInfo, readSnapshot, type Query } from "./read.ts"
+import { defaultDir } from "../../../src/config.ts"
 import type { Snapshot } from "../shared/snapshot.ts"
-
-export const DEFAULT_DIR = "/arboretum/resource-queue"
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT)
 const token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? ""
@@ -58,7 +57,13 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1")
   if (url.pathname === "/health") return json(res, 200, { ok: true })
   if (req.method !== "GET" || url.pathname !== "/snapshot") return json(res, 404, { error: "not-found" })
-  const dir = url.searchParams.get("dir") || DEFAULT_DIR
+  let dir: string
+  try {
+    // The same store as the plugin and the CLI: $RESOURCE_QUEUE_DIR is not passed to services, but the config file is read.
+    dir = url.searchParams.get("dir") || defaultDir()
+  } catch (e) {
+    return json(res, 200, { at: Date.now(), store: { dir: "", ok: false, error: (e as Error).message }, host: hostInfo(), resources: [], recent: [] })
+  }
   if (!dir.startsWith("/") || dir.includes("..")) return json(res, 400, { error: "bad-dir" })
   json(res, 200, snapshot(dir))
 })

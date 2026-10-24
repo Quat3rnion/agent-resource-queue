@@ -28,7 +28,7 @@ const events = el("div", "events")
 
 let dir: string | null = null
 const dirInput = el("input")
-dirInput.placeholder = "/arboretum/resource-queue"
+dirInput.placeholder = "default store"
 dirInput.spellcheck = false
 const save = el("button", "", "Save")
 save.type = "button"
@@ -100,6 +100,7 @@ function resourceCard(r: ResourceView): HTMLElement {
 function render(s: Snapshot): void {
   live.className = "live"
   live.textContent = "Live"
+  if (!dir) dirInput.placeholder = s.store.dir || "default store"
   meta.textContent = `${s.host.name} · ${s.store.dir}`
   meta.title = s.store.dir
   note.hidden = s.store.ok

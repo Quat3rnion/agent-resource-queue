@@ -1,6 +1,6 @@
 ---
 name: resource-queue
-description: How to share host resources such as the GPU and build slots with other agents through the resource-queue FIFO locks (resource_acquire, resource_wait, resource_release, resource_cancel, resource_status, resource_run, and the shell scripts /arboretum/gpu-queue/gpu-turn.sh and build-gate.sh). Use before you run GPU work, benchmarks, model loads or heavy compiles (hipcc, clang, make, cargo), when a command needs a quiet host, or when you need to know who holds the GPU or the build slots.
+description: How to share host resources such as the GPU and build slots with other agents through the resource-queue FIFO locks (resource_acquire, resource_wait, resource_release, resource_cancel, resource_status, resource_run, and the shell scripts gpu-turn.sh and build-gate.sh). Use before you run GPU work, benchmarks, model loads or heavy compiles (hipcc, clang, make, cargo), when a command needs a quiet host, or when you need to know who holds the GPU or the build slots.
 ---
 
 # resource-queue: share the GPU and the build slots
@@ -58,20 +58,22 @@ Add preconditions when your work needs a calm host. The ticket keeps its place u
 ```
 preconditions: [
   { "kind": "mem_available", "min_kb": 8000000, "for_sec": 60 },
-  { "kind": "no_process", "names": ["hipcc", "clang", "ld"] }
+  { "kind": "no_compiler" }
 ]
 ```
+
+`no_compiler` waits until no compiler, assembler or linker runs (hipcc, clang, gcc, cc1plus, rustc, ld, ld.lld and others, also with a version such as clang-22). For other programs, use `{ "kind": "no_process", "names": ["name", ...] }`.
 
 `for_sec` means: the checks must pass without a break for this number of seconds. Tickets behind yours on the same resource also wait, so use only the preconditions that you need.
 
 ## Shell scripts
 
-Use these when you cannot call the tools, for example in a script. They use the same queue as the tools.
+Use these when you cannot call the tools, for example in a script. They use the same queue as the tools. Find them with `command -v gpu-turn.sh build-gate.sh`. If they are not on PATH, ask the operator where they are.
 
 ```sh
-/arboretum/gpu-queue/gpu-turn.sh <agent-name> <max-turn-seconds> <command...>
-/arboretum/gpu-queue/build-gate.sh build <command...>
-/arboretum/gpu-queue/gpu-turn.sh <agent-name> <secs> /arboretum/gpu-queue/build-gate.sh quiet <command...>
+gpu-turn.sh <agent-name> <max-turn-seconds> <command...>
+build-gate.sh build <command...>
+gpu-turn.sh <agent-name> <secs> build-gate.sh quiet <command...>
 ```
 
 - Exit code 75: you do not have the lock yet. Call again in a new tool call. For `gpu-turn.sh`, use the same agent name to keep your place. For `build-gate.sh`, set `BUILD_GATE_NAME=<your agent name>` to keep your place.
@@ -81,7 +83,7 @@ Use these when you cannot call the tools, for example in a script. They use the 
 ## Who holds what
 
 - `resource_status({})` or `resource_status({ resource: "gpu" })` shows the holders, the queue, the hold times and the recent results.
-- In a shell: `bun ~/Projects/agent-resource-guarding/src/cli.ts status`.
-- If a holder blocks you for a long time, ask the holder on IRC (the `nick` in the status). Do not delete files in `/arboretum/resource-queue`. Locks of dead processes and ended sessions are released automatically.
+- In a shell: `resource-queue status`. `resource-queue config` shows the store directory.
+- If a holder blocks you for a long time, ask the holder on IRC (the `nick` in the status). Do not delete files in the store directory. Locks of dead processes and ended sessions are released automatically.
 
-Full documentation: `~/Projects/agent-resource-guarding/README.md`.
+Full documentation: `README.md` in the resource-queue repository (`readlink -f "$(command -v resource-queue)"` shows where it is).

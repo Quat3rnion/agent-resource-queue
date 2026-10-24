@@ -5,9 +5,9 @@ import { appendFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { randomBytes } from "node:crypto"
 import { HOST, ownersDead, pidStartTime } from "./proc.ts"
+import { defaultDir } from "./config.ts"
 import { checkNow, parsePreconditions, requiredSec, systemProbe, type Precondition, type Probe } from "./preconditions.ts"
 
-export const DEFAULT_DIR = process.env.RESOURCE_QUEUE_DIR || "/arboretum/resource-queue"
 export const DEFAULT_CAPACITY: Record<string, number> = { gpu: 1, build: 4 }
 
 export type State = "waiting" | "held" | "released" | "expired" | "canceled"
@@ -88,7 +88,7 @@ export class Store {
   private readonly logPath: string
 
   constructor(opts: StoreOptions = {}) {
-    this.dir = opts.dir ?? DEFAULT_DIR
+    this.dir = opts.dir ?? defaultDir()
     if (this.dir === "/tmp" || this.dir.startsWith("/tmp/")) throw new Error("resource-queue: do not use /tmp for the store")
     mkdirSync(this.dir, { recursive: true })
     this.probe = opts.probe ?? systemProbe

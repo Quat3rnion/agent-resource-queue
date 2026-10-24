@@ -1,10 +1,11 @@
 import { afterAll, expect, test } from "bun:test"
 import { mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
+import { TEST_ROOT } from "../../../test/root.ts"
 import { Store } from "../../../src/store.ts"
 import { readSnapshot, type Query } from "./read.ts"
 
-const DIR = join(process.env.RQ_TEST_ROOT ?? "/arboretum/resource-queue-test", `oc-${process.pid}`)
+const DIR = join(TEST_ROOT, `oc-${process.pid}`)
 mkdirSync(DIR, { recursive: true })
 afterAll(() => rmSync(DIR, { recursive: true, force: true }))
 

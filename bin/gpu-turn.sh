@@ -7,13 +7,21 @@
 # - Runs the command when it holds the lock, then leaves the queue. The command is stopped
 #   after <max-turn-seconds> (exit 124).
 # - Tickets whose owner has not polled for 15 min are dropped (dead agents).
-# - The command also runs under flock on /arboretum/rdna-gpu-tests.lock, for tools that use it directly.
+# - Migration: if a gpu flock file is set ($GPU_FLOCK or "flocks.gpu" in the config), the command also
+#   runs under that flock, for old tools that use the file directly.
 set -u
 name=${1:?agent-name}; max=${2:?max-turn-seconds}; shift 2
 [ "$#" -gt 0 ] || { echo "usage: gpu-turn.sh <agent-name> <max-turn-seconds> <command...>" >&2; exit 2; }
-cli=${RESOURCE_QUEUE_CLI:-$HOME/Projects/agent-resource-guarding/src/cli.ts}
+# Find the CLI: $RESOURCE_QUEUE_CLI, else src/cli.ts next to the real script (install the script as a
+# symbolic link to the repository), else "resource-queue" on PATH (a link to src/cli.ts).
+self=$(readlink -f "${BASH_SOURCE[0]}")
+cli=${RESOURCE_QUEUE_CLI:-}
+if [ -z "$cli" ]; then
+  if [ -f "${self%/*}/../src/cli.ts" ]; then cli="${self%/*}/../src/cli.ts"
+  elif command -v resource-queue >/dev/null 2>&1; then cli=$(readlink -f "$(command -v resource-queue)")
+  else echo "${self##*/}: cannot find the resource-queue CLI. Set RESOURCE_QUEUE_CLI, or install this script as a symbolic link to bin/${self##*/} in the repository." >&2; exit 2
+  fi
+fi
 bun=$(command -v bun || echo "$HOME/.bun/bin/bun")
-lock=${GPU_FLOCK:-/arboretum/rdna-gpu-tests.lock}
-exec "$bun" "$cli" run --resource gpu --holder "$name" --keep --max-hold "$max" \
-  --wait "${GPU_QUEUE_WAIT:-900}" --purpose "gpu-turn: $*" -- \
-  flock -E 75 -w 600 "$lock" "$@"
+exec "$bun" "$cli" run --resource gpu --holder "$name" --keep --max-hold "$max" --flock gpu \
+  --wait "${GPU_QUEUE_WAIT:-900}" --purpose "gpu-turn: $*" -- "$@"

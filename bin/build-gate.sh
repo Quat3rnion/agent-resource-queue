@@ -13,19 +13,27 @@
 # Queue place: set BUILD_GATE_NAME to keep your place across calls. Without it, a call that
 # times out leaves the queue.
 # Hold limits: BUILD_MAX_HOLD (default 7200 s), QUIET_MAX_HOLD (default 1800 s). Exit 124 = stopped.
-# Migration: the command also runs under the old flock (shared for build, exclusive for quiet) on
-# BUILD_FLOCK (default /arboretum/gpu-queue/build.lock), so old-style callers stay safe.
+# Migration: if a build flock file is set ($BUILD_FLOCK or "flocks.build" in the config), the command
+# also runs under that flock (shared for build, exclusive for quiet), so old-style callers stay safe.
 set -u
 mode=${1:-}; shift || true
-cli=${RESOURCE_QUEUE_CLI:-$HOME/Projects/agent-resource-guarding/src/cli.ts}
+# Find the CLI: $RESOURCE_QUEUE_CLI, else src/cli.ts next to the real script (install the script as a
+# symbolic link to the repository), else "resource-queue" on PATH (a link to src/cli.ts).
+self=$(readlink -f "${BASH_SOURCE[0]}")
+cli=${RESOURCE_QUEUE_CLI:-}
+if [ -z "$cli" ]; then
+  if [ -f "${self%/*}/../src/cli.ts" ]; then cli="${self%/*}/../src/cli.ts"
+  elif command -v resource-queue >/dev/null 2>&1; then cli=$(readlink -f "$(command -v resource-queue)")
+  else echo "${self##*/}: cannot find the resource-queue CLI. Set RESOURCE_QUEUE_CLI, or install this script as a symbolic link to bin/${self##*/} in the repository." >&2; exit 2
+  fi
+fi
 bun=$(command -v bun || echo "$HOME/.bun/bin/bun")
-lock=${BUILD_FLOCK:-/arboretum/gpu-queue/build.lock}
 if [ -n "${BUILD_GATE_NAME:-}" ]; then holder=$BUILD_GATE_NAME; keep=--keep; else holder="build-gate:$$"; keep=; fi
 [ "$#" -gt 0 ] || mode=usage
 case "$mode" in
   build) exec "$bun" "$cli" run --resource build --holder "$holder" $keep --max-hold "${BUILD_MAX_HOLD:-7200}" \
-           --wait "${BUILD_WAIT:-1200}" --purpose "build: $*" -- flock -s -E 75 -w "${BUILD_WAIT:-1200}" "$lock" "$@" ;;
+           --wait "${BUILD_WAIT:-1200}" --flock build --purpose "build: $*" -- "$@" ;;
   quiet) exec "$bun" "$cli" run --resource build --exclusive --holder "$holder" $keep --max-hold "${QUIET_MAX_HOLD:-1800}" \
-           --wait "${QUIET_WAIT:-600}" --purpose "quiet: $*" -- flock -x -E 75 -w "${QUIET_WAIT:-600}" "$lock" "$@" ;;
+           --wait "${QUIET_WAIT:-600}" --flock build --purpose "quiet: $*" -- "$@" ;;
   *) echo "usage: build-gate.sh build|quiet <command...>" >&2; exit 2 ;;
 esac

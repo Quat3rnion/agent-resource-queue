@@ -41,6 +41,37 @@ export function processNames(): string[] {
   return names
 }
 
+/**
+ * Name without version suffix and target prefix, so that one name matches all variants:
+ * "clang-22" -> "clang", "x86_64-linux-gnu-gcc-13" -> "gcc", "ld.lld" stays "ld.lld".
+ * /proc/<pid>/comm is cut to 15 characters, so long names arrive cut.
+ */
+export function baseProcessName(comm: string): string {
+  const n = comm.replace(/-\d+(\.\d+)*$/, "")
+  const m = /^(?:[a-z0-9_]+-){2,4}(gcc|g\+\+|cc|c\+\+|as|ld(?:\.[a-z]+)?|clang(?:\+\+)?)$/.exec(n)
+  return m ? m[1]! : n
+}
+
+/** True when a running process name (comm) is one of these names, with or without a version or target. */
+export function nameMatches(comm: string, names: Iterable<string>): boolean {
+  const base = baseProcessName(comm)
+  for (const n of names) if (n === comm || n === base) return true
+  return false
+}
+
+/** Compiler, assembler and linker processes (base names; see baseProcessName). */
+export const COMPILERS = [
+  "hipcc", "nvcc", "rustc", "clang", "clang++", "clang-offload-b", "cc1", "cc1plus", "cc1obj", "cc", "c++", "gcc", "g++",
+  "collect2", "as", "ld", "ld.lld", "ld.bfd", "ld.gold", "ld.mold", "lld", "mold",
+]
+
+/** Running compilers with their count, e.g. ["clang-22 x6", "ld.lld"]. */
+export function runningCompilers(names: string[] = processNames()): string[] {
+  const counts = new Map<string, number>()
+  for (const n of names) if (nameMatches(n, COMPILERS)) counts.set(n, (counts.get(n) ?? 0) + 1)
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([n, c]) => (c > 1 ? `${n} x${c}` : n))
+}
+
 /** MemAvailable in kB, or null when /proc/meminfo is not readable. */
 export function memAvailableKb(): number | null {
   try {
