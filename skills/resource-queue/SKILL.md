@@ -45,7 +45,7 @@ If you do not need the resource any more, call `resource_cancel({ ticket })`.
 
 - **Always release.** Other agents wait for you. The lock is released automatically after `max_hold_sec`, but the time is lost for the others.
 - **Set a real `max_hold_sec`.** Use the expected time plus a margin. Do not use a very large value.
-- **Poll without a break.** A waiting ticket expires after 15 minutes without a poll. A granted ticket expires if you do not see the grant in 5 minutes.
+- **Poll without a break.** A waiting ticket expires after 15 minutes without a poll. A grant that you did not see yet also expires after 15 minutes without a poll.
 - **One wait call is 600 seconds at most.** opencode stops a session that has no events for 60 minutes. So never wait in one call for a long time.
 - **Give `holder`, `nick` and `purpose`.** Other agents see them in `resource_status` and can contact you on IRC.
 - **Do not hold a lock while you think or wait for a person.** Release it, then acquire again.

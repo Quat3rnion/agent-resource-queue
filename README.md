@@ -97,8 +97,7 @@ To set plugin options, wrap `setup` and give `ctx.options` (see `plugins/agent-c
 | --- | --- | --- |
 | `dir` | See the list above | Directory of the store. Do not use `/tmp`. The store refuses it. |
 | `checkIntervalMs` | `2000` | Time between two checks while a ticket waits. |
-| `staleSec` | `900` | A waiting ticket expires when nobody polls it for this time. |
-| `claimSec` | `300` | A granted ticket expires when its owner does not see the grant in this time. |
+| `staleSec` | `900` | A waiting ticket, or a granted ticket that its owner did not see yet, expires when nobody polls it for this time. |
 | `capacity` | `{ "gpu": 1, "build": 4 }` | Number of parallel holders for each resource. These values apply only when the resource is new in the store. A resource that is not in the store gets capacity 1. |
 
 To change the capacity of a resource in the store, use `resource-queue capacity --resource build --set 6`.
@@ -198,7 +197,7 @@ Each poll of each ticket first removes tickets whose owner is gone. You do not h
 - **The session ends**: The plugin receives `session.deleted` and releases the tickets of the session.
 - **The process dies**: The store records the PID and the start time of the owner process. For `resource_run` and the shell scripts, the store also records the command process. A ticket ends when all its recorded processes are dead. The start time makes sure that a new process with the same PID does not keep the lock.
 - **`max_hold_sec` is over.**
-- **Nobody sees the grant**: The owner does not see a granted lock in `claimSec`.
+- **Nobody sees the grant**: A ticket was granted, but its owner did not poll for `staleSec`. An owner that is between tool calls keeps the grant if it polls again in this time.
 - **Nobody polls a waiting ticket** for `staleSec`.
 
 The PID check works only on the host that made the ticket.

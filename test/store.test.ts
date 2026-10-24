@@ -106,6 +106,33 @@ describe("crash safety", () => {
     expect(s.ticket(a.ticket.id)!.state).toBe("expired")
   })
 
+  test("a grant that arrives while the owner is between tool calls stays claimable (bug: 300 s claim window)", () => {
+    let now = 1_000_000
+    const s = new Store({ dir: fresh(), now: () => now }) // default staleSec 900
+    s.setCapacity("build", 1)
+    const a = acq(s, A, "build", { max_hold_sec: 600 })
+    const b = acq(s, B, "build")
+    expect(s.poll(b.ticket.id, B).status).toBe("waiting") // b's last poll
+    now += 142_000
+    s.release(a.ticket.id, A) // grant comes 142 s after b's last poll
+    now += 301_000 // b's next call comes 443 s after its last poll, 301 s after the grant
+    s.tick()
+    expect(s.poll(b.ticket.id, B).status).toBe("granted")
+  })
+
+  test("closing the store during a wait does not fail the wait (bug: closed database)", async () => {
+    const s = new Store({ dir: fresh(), checkIntervalMs: 20 })
+    const a = acq(s, A)
+    const b = acq(s, B)
+    const waiting = s.wait(b.ticket.id, 5, B)
+    await Bun.sleep(50)
+    s.close() // an idle plugin instance is disposed while another call waits
+    const other = new Store({ dir: s.dir })
+    other.release(a.ticket.id, A)
+    expect((await waiting).status).toBe("granted")
+    other.close()
+  })
+
   test("a reused PID with another start time counts as dead", () => {
     const s = new Store({ dir: fresh() })
     const a = s.acquire({ resource: "gpu", holder: "x", purpose: "x", max_hold_sec: 600, owner_pid: process.pid })
@@ -116,14 +143,17 @@ describe("crash safety", () => {
 
   test("max_hold_sec, session end, stale waiters and unseen grants are recovered", () => {
     let now = 1_000_000
-    const s = new Store({ dir: fresh(), now: () => now, staleSec: 100, claimSec: 30 })
+    const s = new Store({ dir: fresh(), now: () => now, staleSec: 100 })
     const a = acq(s, A, "gpu", { max_hold_sec: 10 })
     const b = acq(s, B)
     now += 11_000
     s.tick()
     expect(s.ticket(a.ticket.id)!.end_reason).toMatch(/max_hold_sec/)
     expect(s.ticket(b.ticket.id)!.state).toBe("held") // granted while b was not looking
-    now += 31_000
+    now += 88_000 // 99 s since b's last poll: b may still be between tool calls
+    s.tick()
+    expect(s.ticket(b.ticket.id)!.state).toBe("held")
+    now += 2_000
     s.tick()
     expect(s.ticket(b.ticket.id)!.end_reason).toMatch(/not seen/)
 

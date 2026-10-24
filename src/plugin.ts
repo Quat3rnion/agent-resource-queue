@@ -1,5 +1,5 @@
 // opencode plugin: shared resource locks with a fair FIFO wait queue.
-// Options (all optional): dir, checkIntervalMs, staleSec, claimSec, capacity { name: N }.
+// Options (all optional): dir, checkIntervalMs, staleSec, capacity { name: N }.
 import { appendFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { Store, formatStatus, type Owner, type StoreOptions, type WaitResult } from "./store.ts"
@@ -206,15 +206,38 @@ export function sessionDeletedID(ev: unknown): string | null {
   return typeof id === "string" ? id : null
 }
 
+// opencode makes one plugin instance per location and disposes idle ones. All instances in a process
+// share one Store per directory; the last dispose closes it.
+const shared = new Map<string, { store: Store; refs: number }>()
+
+function acquireStore(opts: StoreOptions): Store {
+  const probe = new Store(opts)
+  const entry = shared.get(probe.dir)
+  if (entry) {
+    probe.close()
+    entry.refs++
+    return entry.store
+  }
+  shared.set(probe.dir, { store: probe, refs: 1 })
+  return probe
+}
+
+function releaseStore(store: Store): void {
+  const entry = shared.get(store.dir)
+  if (!entry || entry.store !== store) return store.close()
+  if (--entry.refs > 0) return
+  shared.delete(store.dir)
+  store.close()
+}
+
 export default {
   id: "resource-queue",
   async setup(ctx: Ctx) {
     const o = (ctx.options ?? {}) as Json
-    const store = new Store({
+    const store = acquireStore({
       dir: o.dir as string | undefined,
       checkIntervalMs: o.checkIntervalMs as number | undefined,
       staleSec: o.staleSec as number | undefined,
-      claimSec: o.claimSec as number | undefined,
       capacity: o.capacity as StoreOptions["capacity"],
     })
     const tools = createTools(store, { cwd: ctx.location?.directory })
@@ -250,7 +273,7 @@ export default {
     return async () => {
       abort.abort()
       await reg.dispose()
-      store.close()
+      releaseStore(store)
     }
   },
 }

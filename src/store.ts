@@ -63,8 +63,6 @@ export interface StoreOptions {
   now?: () => number
   /** A waiting ticket that nobody polls for this long expires. */
   staleSec?: number
-  /** A granted ticket that its owner does not see within this time expires. */
-  claimSec?: number
   /** Poll interval of wait(). */
   checkIntervalMs?: number
   capacity?: Record<string, number>
@@ -79,11 +77,10 @@ const RESOURCE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 export class Store {
   readonly dir: string
-  readonly db: Database
+  private handle: Database | null = null
   readonly probe: Probe
   readonly now: () => number
   readonly staleSec: number
-  readonly claimSec: number
   readonly checkIntervalMs: number
   private readonly logPath: string
 
@@ -94,13 +91,8 @@ export class Store {
     this.probe = opts.probe ?? systemProbe
     this.now = opts.now ?? Date.now
     this.staleSec = opts.staleSec ?? 900
-    this.claimSec = opts.claimSec ?? 300
     this.checkIntervalMs = opts.checkIntervalMs ?? 2000
     this.logPath = join(this.dir, "events.log")
-    this.db = new Database(join(this.dir, "queue.sqlite"), { create: true })
-    this.db.exec("PRAGMA busy_timeout = 10000")
-    this.db.exec("PRAGMA journal_mode = WAL")
-    this.db.exec("PRAGMA synchronous = NORMAL")
     this.tx(() => {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS resources (name TEXT PRIMARY KEY, capacity INTEGER NOT NULL);
@@ -123,8 +115,25 @@ export class Store {
     })
   }
 
+  /**
+   * The SQLite handle. It opens again on demand after close(), so a call that is still running when
+   * its plugin instance is disposed continues instead of failing with "closed database".
+   */
+  get db(): Database {
+    if (!this.handle) {
+      const db = new Database(join(this.dir, "queue.sqlite"), { create: true })
+      db.exec("PRAGMA busy_timeout = 10000")
+      db.exec("PRAGMA journal_mode = WAL")
+      db.exec("PRAGMA synchronous = NORMAL")
+      this.handle = db
+    }
+    return this.handle
+  }
+
   close(): void {
-    this.db.close()
+    const db = this.handle
+    this.handle = null
+    db?.close()
   }
 
   private pendingLog: string[] = []
@@ -313,8 +322,10 @@ export class Store {
         why = `owner process ${[t.owner_pid, t.run_pid].filter((p) => p !== null).join(" and ")} died`
       } else if (t.state === "held" && t.claimed && t.granted_at !== null && now - t.granted_at > t.max_hold_sec * 1000) {
         why = `max_hold_sec ${t.max_hold_sec} passed`
-      } else if (t.state === "held" && !t.claimed && now - (t.granted_at ?? now) > this.claimSec * 1000) {
-        why = `grant not seen by owner within ${this.claimSec} s`
+      } else if (t.state === "held" && !t.claimed && now - t.last_seen > this.staleSec * 1000) {
+        // The owner may be between tool calls when the grant comes; it keeps the grant while it polls
+        // within staleSec, the same rule as for a waiting ticket.
+        why = `grant not seen: owner did not poll for ${this.staleSec} s`
       } else if (t.state === "waiting" && now - t.last_seen > this.staleSec * 1000) {
         why = `not polled for ${this.staleSec} s`
       }
