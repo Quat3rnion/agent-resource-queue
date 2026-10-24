@@ -1,0 +1,43 @@
+{
+  "name": "openchamber-resource-queue",
+  "version": "0.1.0",
+  "description": "Shows the resource-queue locks: who holds each resource, the wait queue, hold times, blocked preconditions and recent events",
+  "private": true,
+  "type": "module",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.3.3"
+    },
+    "contributes": {
+      "panel": {
+        "id": "resource-queue",
+        "name": "Resource Queue",
+        "icon": "lock-2-line",
+        "entry": "panel/index.html"
+      },
+      "statusSection": {
+        "entry": "status/index.html",
+        "title": "Resource locks",
+        "height": 56
+      },
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": {
+          "exec": []
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src"
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "^2.5.1",
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "opencode-resource-queue",
+  "version": "0.1.0",
+  "description": "opencode plugin and CLI: shared resource locks with a fair FIFO wait queue",
+  "type": "module",
+  "exports": {
+    ".": "./src/plugin.ts"
+  },
+  "bin": {
+    "resource-queue": "./src/cli.ts"
+  },
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
