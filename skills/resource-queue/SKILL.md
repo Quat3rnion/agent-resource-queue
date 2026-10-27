@@ -28,7 +28,7 @@ resource_run({ resource: "gpu", holder: "<your agent name>", nick: "<your IRC ni
 
 - If the result is `waiting`, call `resource_run` again with `ticket: "<ticket>"` and the same arguments. Do this in the next tool call. You keep your place.
 - The result shows the exit code and the last part of the output. The full output is in the log file that the result names.
-- Exit code 124 means the command ran longer than `max_hold_sec` and was stopped.
+- Exit code 124 means the command ran longer than `max_hold_sec` and was stopped. All processes that the command started (make, compilers, background jobs) are stopped too, before the lock is released. Do not start a process that must outlive the command from `resource_run`.
 
 ## Several steps: acquire, wait, release
 

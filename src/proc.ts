@@ -82,6 +82,38 @@ export function memAvailableKb(): number | null {
   }
 }
 
+/** PIDs of all live processes in session `sid` (field 6 of /proc/<pid>/stat). Zombies do not count. */
+export function sessionMembers(sid: number): number[] {
+  const out: number[] = []
+  let entries: string[]
+  try {
+    entries = readdirSync("/proc")
+  } catch {
+    return out
+  }
+  for (const e of entries) {
+    if (!/^\d+$/.test(e)) continue
+    try {
+      const stat = readFileSync(`/proc/${e}/stat`, "utf8")
+      const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ")
+      if (rest[0] !== "Z" && Number(rest[3]) === sid) out.push(Number(e))
+    } catch {}
+  }
+  return out
+}
+
+/** SIGKILL every process in session `sid`. Returns how many got the signal. */
+export function killSession(sid: number): number {
+  let n = 0
+  for (const pid of sessionMembers(sid)) {
+    try {
+      process.kill(pid, "SIGKILL")
+      n++
+    } catch {}
+  }
+  return n
+}
+
 export interface TicketProcesses {
   owner_pid: number | null
   owner_start: string | null
@@ -94,5 +126,8 @@ export function ownersDead(t: TicketProcesses): boolean {
   const procs: [number, string | null][] = []
   if (t.owner_pid !== null) procs.push([t.owner_pid, t.owner_start])
   if (t.run_pid !== null) procs.push([t.run_pid, t.run_start])
-  return procs.length > 0 && procs.every(([pid, start]) => !processAlive(pid, start))
+  if (procs.length === 0) return false
+  if (procs.some(([pid, start]) => processAlive(pid, start))) return false
+  // The command runs in its own session (run_pid is its ID). Processes it started may outlive it.
+  return t.run_pid === null || sessionMembers(t.run_pid).length === 0
 }

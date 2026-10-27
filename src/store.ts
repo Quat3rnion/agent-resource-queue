@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite"
 import { appendFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { randomBytes } from "node:crypto"
-import { HOST, ownersDead, pidStartTime } from "./proc.ts"
+import { HOST, killSession, ownersDead, pidStartTime } from "./proc.ts"
 import { defaultDir } from "./config.ts"
 import { checkNow, parsePreconditions, requiredSec, systemProbe, type Precondition, type Probe } from "./preconditions.ts"
 
@@ -343,6 +343,9 @@ export class Store {
         why = `not polled for ${this.staleSec} s`
       }
       if (why) {
+        // A command that still runs would use the resource without a lock: stop its session.
+        // Only on this host, and only for a session that the runner made (run_pid is its ID).
+        if (t.run_pid !== null && t.host === HOST) killSession(t.run_pid)
         this.finish(t, state, why)
         n++
       }

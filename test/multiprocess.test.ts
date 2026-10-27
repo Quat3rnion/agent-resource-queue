@@ -43,15 +43,20 @@ test("processes that contend for one resource run in FIFO order, one at a time",
   expect(lines(out)).toEqual(holders.flatMap((h) => [`start ${h}`, `end ${h}`]))
 }, 30_000)
 
-test("a crashed CLI holder (process group killed) loses the lock within one check interval", async () => {
+test("a crashed CLI holder whose command also died loses the lock within one check interval", async () => {
   const dir = fresh()
   const holder = cli(dir, ["run", "--resource", "gpu", "--holder", "victim", "--max-hold", "600", "--", "sleep", "600"], { detached: true })
   const s = new Store({ dir, checkIntervalMs: 200 })
   await until(() => s.status("gpu")[0]!.holders.some((h) => h.holder === "victim" && s.ticket(h.ticket)!.run_pid !== null))
   const b = s.acquire({ resource: "gpu", holder: "next", purpose: "x", max_hold_sec: 60 })
   expect(b.status).toBe("waiting")
+  const sid = s.ticket(s.status("gpu")[0]!.holders[0]!.ticket)!.run_pid!
   process.kill(-holder.pid, "SIGKILL")
   await holder.exited
+  // The command has its own session, so it survives the runner and keeps the lock while it runs.
+  await Bun.sleep(300)
+  expect((await s.wait(b.ticket.id, 0, { holder: "next" })).status).toBe("waiting")
+  process.kill(-sid, "SIGKILL")
   const t0 = Date.now()
   expect((await s.wait(b.ticket.id, 10, { holder: "next" })).status).toBe("granted")
   expect(Date.now() - t0).toBeLessThan(200 + 300)

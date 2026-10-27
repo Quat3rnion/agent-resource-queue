@@ -1,6 +1,8 @@
-// Run a command while a ticket holds its lock. The child is recorded on the ticket, so the lock
-// stays while the child runs even if the caller is killed, and is freed when both are gone.
+// Run a command while a ticket holds its lock. The command runs in its own session, which is recorded
+// on the ticket: the lock stays while any process of that session runs, even if the caller is killed.
+// On timeout, abort or exit, the whole session is stopped before the caller releases the lock.
 import type { Owner, Store } from "./store.ts"
+import { sessionMembers } from "./proc.ts"
 
 export interface RunOptions {
   cmd: string[]
@@ -9,33 +11,34 @@ export interface RunOptions {
   onOutput?: (chunk: string) => void
   signal?: AbortSignal
   cwd?: string
+  /** Time between TERM and KILL when the command is stopped. Default 15 s. */
+  graceMs?: number
 }
 
 /** Exit code 124 means the command ran out of time (like timeout(1)). */
 export async function runHeld(store: Store, ticket: string, who: Owner, opts: RunOptions): Promise<{ code: number; timedOut: boolean }> {
   const pipe = !!opts.onOutput
+  const grace = opts.graceMs ?? 15_000
+  // A new session (setsid): everything the command starts keeps this session ID, also after its parent
+  // dies and it is reparented. The session is what we stop, and what keeps the lock alive.
   const child = Bun.spawn(opts.cmd, {
     cwd: opts.cwd,
+    detached: true,
     stdin: pipe ? "ignore" : "inherit",
     stdout: pipe ? "pipe" : "inherit",
     stderr: pipe ? "pipe" : "inherit",
   })
-  store.bindRun(ticket, who, child.pid)
+  const sid = child.pid
+  store.bindRun(ticket, who, sid)
   let timedOut = false
-  const kill = (sig: NodeJS.Signals) => {
-    try {
-      child.kill(sig)
-    } catch {}
-  }
-  const stop = () => {
-    kill("SIGTERM")
-    setTimeout(() => kill("SIGKILL"), 15_000).unref?.()
-  }
+  let stopping: Promise<void> | null = null
+  const stop = () => (stopping ??= stopSession(sid, grace))
   const timer = setTimeout(() => {
     timedOut = true
-    stop()
+    void stop()
   }, Math.max(1, opts.maxHoldSec) * 1000)
-  opts.signal?.addEventListener("abort", stop, { once: true })
+  const onAbort = () => void stop()
+  opts.signal?.addEventListener("abort", onAbort, { once: true })
   const readers: Promise<void>[] = []
   if (pipe) {
     for (const s of [child.stdout, child.stderr] as ReadableStream<Uint8Array>[]) {
@@ -46,8 +49,30 @@ export async function runHeld(store: Store, ticket: string, who: Owner, opts: Ru
     }
   }
   const code = await child.exited
-  await Promise.all(readers)
   clearTimeout(timer)
-  opts.signal?.removeEventListener("abort", stop)
+  opts.signal?.removeEventListener("abort", onAbort)
+  // Processes that the command left behind (background jobs, orphaned compilers) end with it, before the
+  // caller releases the lock. They also hold the output pipes open, so stop them before reading to the end.
+  await stop()
+  await Promise.all(readers)
   return { code: timedOut ? 124 : code, timedOut }
+}
+
+/** TERM every process in the session, KILL what is left after `graceMs`, and wait until none is left. */
+export async function stopSession(sid: number, graceMs: number): Promise<void> {
+  const signal = (sig: NodeJS.Signals) => {
+    for (const pid of sessionMembers(sid)) {
+      try {
+        process.kill(pid, sig)
+      } catch {}
+    }
+  }
+  if (!sessionMembers(sid).length) return
+  signal("SIGTERM")
+  const end = Date.now() + graceMs
+  while (sessionMembers(sid).length && Date.now() < end) await Bun.sleep(100)
+  for (let i = 0; i < 50 && sessionMembers(sid).length; i++) {
+    signal("SIGKILL")
+    await Bun.sleep(100)
+  }
 }

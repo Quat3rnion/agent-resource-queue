@@ -201,8 +201,10 @@ Example: at least 8 GB available for 60 seconds, and no compiler is running:
 Each poll of each ticket first removes tickets whose owner is gone. You do not have to clean up a stale lock. The store ends a ticket in these conditions:
 
 - **The session ends**: The plugin receives `session.deleted` and releases the tickets of the session.
-- **The process dies**: The store records the PID and the start time of the owner process. For `resource_run` and the shell scripts, the store also records the command process. A ticket ends when all its recorded processes are dead. The start time makes sure that a new process with the same PID does not keep the lock.
-- **`max_hold_sec` is over.**
+- **The process dies**: The store records the PID and the start time of the owner process. For `resource_run` and the shell scripts, the command runs in its own session (`setsid`), and the store records the session. A ticket ends when the owner process is dead and no process of the session is left. Thus a compiler that a crashed runner left behind keeps the lock while it runs. The start time makes sure that a new process with the same PID does not keep the lock.
+- **`max_hold_sec` is over.** If processes of the command's session still run on this host, the store stops them with SIGKILL, so that they cannot use the resource without a lock.
+
+When `resource_run` or a shell script stops a command (time limit, abort) or the command ends, it stops all processes of the command's session: TERM, then KILL after 15 seconds. This includes background jobs and processes whose parent died, for example `make` and `clang` under a `bash -c` that ended. The lock is released only after no process of the session is left.
 - **Nobody sees the grant**: A ticket was granted, but its owner did not poll for `staleSec`. An owner that is between tool calls keeps the grant if it polls again in this time.
 - **Nobody polls a waiting ticket** for `staleSec`.
 

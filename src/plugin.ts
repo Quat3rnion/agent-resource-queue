@@ -136,7 +136,7 @@ export function createTools(store: Store, defaults: { cwd?: string } = {}) {
         properties: {
           resource: s("Resource name."),
           cmd: s("Shell command (run with bash -c)."),
-          max_hold_sec: n("Longest run time. The command is stopped (TERM, then KILL after 15 s) after it.", { exclusiveMinimum: 0 }),
+          max_hold_sec: n("Longest run time. Then the command and every process it started (its whole session) are stopped: TERM, then KILL after 15 s. Processes left behind by a command that ends are stopped too. The lock is released after that.", { exclusiveMinimum: 0 }),
           ...identity,
           purpose: s("What the command does. Default: the command."),
           ticket: s("Ticket from an earlier resource_run that returned waiting."),
