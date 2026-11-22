@@ -227,7 +227,9 @@ bun src/cli.ts run --resource gpu --holder my-agent --keep --max-hold 600 --wait
 
 Exit codes: `0` granted or done, `75` not granted yet (call again), `124` the command ran out of time, `1` the ticket ended or an error occurred, `2` incorrect usage. `run` gives the exit code of the command.
 
-`--keep` keeps a waiting ticket after the process stops. Call again with the same `--holder` to keep your place. Without `--keep`, the ticket ends with the process.
+`acquire --keep` leaves your ticket in the queue after the process exits. For `run`, `--keep` keeps your ticket when the queue wait times out. Call again with the same `--holder` to keep your place. If you stop a waiting `run` with a signal, it cancels its ticket.
+
+A second `run` with the same resource, holder, and session exits with code 1 while the first owns the ticket. It does not run the command or change that ticket. This also applies to the shell scripts below.
 
 ## Shell scripts
 

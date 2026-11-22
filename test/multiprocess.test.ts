@@ -1,6 +1,6 @@
 // Several real processes share one store through the CLI and the wrapper scripts.
 import { afterAll, expect, test } from "bun:test"
-import { mkdirSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { TEST_ROOT } from "./root.ts"
 import { Store } from "../src/store.ts"
@@ -21,9 +21,24 @@ const cli = (dir: string, args: string[], opts: { detached?: boolean } = {}) =>
   Bun.spawn(["bun", CLI, ...args], { env: env(dir), stdout: "pipe", stderr: "pipe", ...opts })
 const lines = (p: string) => readFileSync(p, "utf8").trim().split("\n")
 
-async function until(fn: () => boolean, ms = 10_000) {
+async function status(dir: string, resource: string) {
+  const p = cli(dir, ["status", "--resource", resource, "--json"])
+  const snapshots = await new Response(p.stdout).json() as ReturnType<Store["status"]>
+  expect(await p.exited).toBe(0)
+  return snapshots[0]!
+}
+
+function wrapper(dir: string, mode: "gpu" | "build" | "quiet", holder: string, wait: string, cmd: string[]) {
+  const argv = mode === "gpu" ? [join(BIN, "gpu-turn.sh"), holder, "20"] : [join(BIN, "build-gate.sh"), mode]
+  return Bun.spawn([...argv, ...cmd], {
+    env: env(dir, { BUILD_GATE_NAME: holder, GPU_QUEUE_WAIT: wait, BUILD_WAIT: wait, QUIET_WAIT: wait, BUILD_MAX_HOLD: "20", QUIET_MAX_HOLD: "20" }),
+    stdin: "pipe", stdout: "pipe", stderr: "pipe",
+  })
+}
+
+async function until(fn: () => boolean | Promise<boolean>, ms = 10_000) {
   const end = Date.now() + ms
-  while (!fn()) {
+  while (!(await fn())) {
     if (Date.now() > end) throw new Error("timeout")
     await Bun.sleep(25)
   }
@@ -87,22 +102,120 @@ test("concurrent use from many processes keeps the store consistent and respects
   s.close()
 }, 120_000)
 
-test("gpu-turn.sh: exit 75 while another holds the GPU, keeps its place, then runs", async () => {
+for (const mode of ["gpu", "build", "quiet"] as const) {
+  const resource = mode === "gpu" ? "gpu" : "build"
+  const label = mode === "gpu" ? "gpu-turn.sh" : `build-gate.sh ${mode}`
+
+  test(`${label}: deliberate exit 75 keeps the same FIFO ticket for retry`, async () => {
+    const dir = fresh()
+    expect(await cli(dir, ["capacity", "--resource", resource, "--set", "1"]).exited).toBe(0)
+    const hold = cli(dir, ["acquire", "--resource", resource, "--holder", "blocker", "--session", "test", "--keep", "--exclusive", "--max-hold", "60"])
+    const blocker = (await new Response(hold.stdout).json()).ticket.id as string
+    expect(await hold.exited).toBe(0)
+    const run = (holder: string) => wrapper(dir, mode, holder, "0", ["echo", holder])
+    const first = run("first")
+    expect(await first.exited).toBe(75)
+    expect(await new Response(first.stderr).text()).toContain("position 1")
+    expect(await run("next").exited).toBe(75)
+    const waiting = (await status(dir, resource)).queue
+    expect(waiting.map((q) => q.holder)).toEqual(["first", "next"])
+
+    expect(await cli(dir, ["release", "--ticket", blocker, "--session", "test", "--holder", "blocker"]).exited).toBe(0)
+    // The later caller retries first; it must not take the head's grant.
+    expect(await run("next").exited).toBe(75)
+    const retry = run("first")
+    expect(await retry.exited).toBe(0)
+    expect((await new Response(retry.stdout).text()).trim()).toBe("first")
+    expect(await run("next").exited).toBe(0)
+    const done = await status(dir, resource)
+    expect(done.holders).toEqual([])
+    expect(done.recent.filter((e) => e.event === "released (held)").map((e) => e.ticket).reverse()).toEqual([
+      blocker, ...waiting.map((q) => q.ticket),
+    ])
+  }, 30_000)
+
+  for (const signal of [false, true]) {
+    test(`${label}: ${signal ? "stopping" : "exiting"} a duplicate before flock cannot end the owner's ticket`, async () => {
+      const dir = fresh()
+      const out = join(dir, "order")
+      // Initialize the store before racing wrappers, with one slot so both build modes queue.
+      expect(await cli(dir, ["capacity", "--resource", resource, "--set", "1"]).exited).toBe(0)
+      const snapshot = () => status(dir, resource)
+      const children: { stdin: { end(): unknown }; exited: Promise<number> }[] = []
+      const track = <T extends (typeof children)[number]>(p: T) => {
+        children.push(p)
+        return p
+      }
+      const wrap = (holder: string, wait: string, cmd: string[]) => track(wrapper(dir, mode, holder, wait, cmd))
+      try {
+        // A legacy user of the physical lock keeps even the logical owner from entering its command.
+        const ready = join(dir, "legacy-ready")
+        const legacy = track(Bun.spawn(
+          ["flock", "-x", join(dir, `${resource}.flock`), "bash", "-c", 'touch "$1"; read -r _ || true', "_", ready],
+          { env: env(dir), stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+        ))
+        await until(() => existsSync(ready))
+        const primary = wrap("owner", "15", ["bash", "-c", 'echo owner-start >> "$1"; read -r _ || true; echo owner-end >> "$1"', "_", out])
+        await until(async () => (await snapshot()).holders[0]?.holder === "owner")
+        const ticket = (await snapshot()).holders[0]!.ticket
+        const successor = wrap("next", "15", ["bash", "-c", 'echo next >> "$1"', "_", out])
+        await until(async () => (await snapshot()).queue[0]?.holder === "next")
+
+        const mirror = wrap("owner", signal ? "5" : "0", ["bash", "-c", 'echo duplicate >> "$1"', "_", out])
+        if (signal) {
+          // Wait for the wrapper's first diagnostic, not a sleep or a race at startup.
+          const stderr = mirror.stderr.getReader()
+          try {
+            expect((await stderr.read()).done).toBe(false)
+            if (mirror.exitCode === null) mirror.kill("SIGTERM")
+          } finally {
+            stderr.releaseLock()
+          }
+        }
+        expect(await mirror.exited).not.toBe(0)
+        const afterMirror = await snapshot()
+        expect(afterMirror.holders.map((h) => [h.holder, h.ticket])).toEqual([["owner", ticket]])
+        expect(afterMirror.queue.map((q) => q.holder)).toEqual(["next"])
+        expect(existsSync(out)).toBe(false)
+
+        legacy.stdin.end()
+        expect(await legacy.exited).toBe(0)
+        await until(() => existsSync(out) && lines(out)[0] === "owner-start")
+        expect((await snapshot()).holders[0]?.ticket).toBe(ticket)
+        primary.stdin.end()
+        expect(await Promise.all([primary.exited, successor.exited])).toEqual([0, 0])
+        expect(lines(out)).toEqual(["owner-start", "owner-end", "next"])
+        const done = await snapshot()
+        expect(done.holders).toEqual([])
+        expect(done.recent.map(({ holder, event }) => [holder, event]).reverse()).toEqual([
+          ["owner", "granted"], ["owner", "released (held)"], ["next", "granted"], ["next", "released (held)"],
+        ])
+      } finally {
+        for (const child of children) child.stdin.end()
+        await Promise.all(children.map((child) => child.exited))
+      }
+    }, 30_000)
+  }
+}
+
+test("gpu-turn.sh: only the waiting owner can cancel its ticket", async () => {
   const dir = fresh()
-  const s = new Store({ dir })
-  const a = s.acquire({ resource: "gpu", holder: "plugin-agent", session_id: "ses_X", purpose: "x", max_hold_sec: 60 })
-  expect(a.status).toBe("granted")
-  const turn = (name: string) => Bun.spawn([join(BIN, "gpu-turn.sh"), name, "30", "echo", "ran"], { env: env(dir, { GPU_QUEUE_WAIT: "1" }), stdout: "pipe", stderr: "pipe" })
-  const p1 = turn("wrapper-agent")
-  expect(await p1.exited).toBe(75)
-  expect(await new Response(p1.stderr).text()).toContain("position 1")
-  expect(s.status("gpu")[0]!.queue.map((q) => q.holder)).toEqual(["wrapper-agent"])
-  s.release(a.ticket.id, { sessionID: "ses_X" })
-  const p2 = turn("wrapper-agent")
-  expect(await p2.exited).toBe(0)
-  expect((await new Response(p2.stdout).text()).trim()).toBe("ran")
-  expect(s.status("gpu")[0]!.queue).toEqual([])
-  s.close()
+  expect(await cli(dir, ["acquire", "--resource", "gpu", "--holder", "blocker", "--keep"]).exited).toBe(0)
+  const primary = wrapper(dir, "gpu", "owner", "15", ["true"])
+  try {
+    await until(async () => (await status(dir, "gpu")).queue[0]?.holder === "owner")
+    const ticket = (await status(dir, "gpu")).queue[0]!.ticket
+    expect(await wrapper(dir, "gpu", "owner", "0", ["true"]).exited).toBe(1)
+    expect((await status(dir, "gpu")).queue.map((q) => q.ticket)).toEqual([ticket])
+    primary.kill("SIGTERM")
+    expect(await primary.exited).toBe(1)
+    const after = await status(dir, "gpu")
+    expect(after.queue).toEqual([])
+    expect(after.recent[0]?.event).toBe("canceled (waiting)")
+  } finally {
+    if (primary.exitCode === null) primary.kill("SIGTERM")
+    await primary.exited
+  }
 }, 30_000)
 
 test("build-gate.sh quiet waits for builds, and new builds queue behind it", async () => {

@@ -197,20 +197,36 @@ export class Store {
   // ------------------------------------------------------------------ mutations
 
   acquire(input: AcquireInput): WaitResult {
+    return this.acquireTicket(input, false)
+  }
+
+  /** Reserve the ticket before waiting or trying to start the command. */
+  acquireRun(input: Omit<AcquireInput, "owner_pid">): WaitResult {
+    return this.acquireTicket({ ...input, owner_pid: process.pid }, true)
+  }
+
+  private acquireTicket(input: AcquireInput, forRun: boolean): WaitResult {
     checkResource(input.resource)
     if (!input.holder.trim()) throw new Error("holder must not be empty")
     if (!Number.isFinite(input.max_hold_sec) || input.max_hold_sec <= 0) throw new Error("max_hold_sec must be > 0")
     const pre = parsePreconditions(input.preconditions)
-    return this.tx(() => {
+    const result = this.tx(() => {
       this.reap()
       const owner: Owner = { sessionID: input.session_id, holder: input.holder }
       // A second acquire by the same owner returns the ticket it already has.
       const existing = this.db
         .prepare("SELECT * FROM tickets WHERE resource = ? AND state IN ('waiting','held') AND holder = ? AND coalesce(session_id,'') = ? ORDER BY seq LIMIT 1")
         .get(input.resource, input.holder, input.session_id ?? "") as Ticket | null
+      const pid = input.owner_pid ?? null
+      const start = pid === null ? null : pidStartTime(pid)
       let t: Ticket
       if (existing && isOwner(existing, owner)) {
         t = existing
+        if (forRun) {
+          // Reap already removed dead owners. Only a ticket left without a runner can be taken over.
+          if (t.owner_pid !== null || t.run_pid !== null) return { busy: t.id }
+          this.db.prepare("UPDATE tickets SET owner_pid = ?, owner_start = ?, host = ? WHERE id = ?").run(pid, start, HOST, t.id)
+        }
         this.db.prepare("UPDATE tickets SET last_seen = ? WHERE id = ?").run(this.now(), t.id)
         // A waiting ticket takes the latest request (e.g. a ticket that was carried over from the old queue).
         if (t.state === "waiting")
@@ -219,19 +235,32 @@ export class Store {
       } else {
         const now = this.now()
         const id = `${input.resource}-${randomBytes(4).toString("hex")}`
-        const pid = input.owner_pid ?? null
         this.db
           .prepare(
             `INSERT INTO tickets (id, resource, holder, nick, session_id, purpose, exclusive, max_hold_sec, preconditions,
              owner_pid, owner_start, host, state, created_at, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'waiting', ?, ?)`,
           )
           .run(id, input.resource, input.holder, input.nick ?? null, input.session_id ?? null, input.purpose, input.exclusive ? 1 : 0,
-            Math.ceil(input.max_hold_sec), JSON.stringify(pre), pid, pid === null ? null : pidStartTime(pid), HOST, now, now)
+            Math.ceil(input.max_hold_sec), JSON.stringify(pre), pid, start, HOST, now, now)
         t = this.get(id)!
         this.log(t, "enqueue", null, pre.length ? `preconditions ${JSON.stringify(pre)}` : null)
       }
       this.grantAll()
       return this.result(this.get(t.id)!, true)
+    })
+    if ("busy" in result) throw new Error(`ticket ${result.busy} already has a live owner`)
+    return result
+  }
+
+  /** A normal wait timeout leaves the ticket for a later invocation of the same command. */
+  keepRunForRetry(id: string, who: Owner): void {
+    this.tx(() => {
+      const t = this.mustOwn(id, who)
+      // The queue may have granted it since the last poll, but this runner has not started a command.
+      if ((t.state !== "waiting" && t.state !== "held") || t.run_pid !== null ||
+        t.host !== HOST || t.owner_pid !== process.pid || t.owner_start !== pidStartTime(process.pid))
+        throw new Error(`ticket ${id} cannot be kept for retry`)
+      this.db.prepare("UPDATE tickets SET owner_pid = NULL, owner_start = NULL WHERE id = ?").run(id)
     })
   }
 

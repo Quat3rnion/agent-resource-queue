@@ -21,7 +21,8 @@ common: --dir DIR --nick N --session ID
 store directory: --dir, else $RESOURCE_QUEUE_DIR, else "dir" in ${configPath()}, else ~/.local/state/resource-queue
 --flock gpu|build: also run the command under that flock file ($GPU_FLOCK / $BUILD_FLOCK or "flocks" in the config),
   shared for a build slot, exclusive otherwise. Nothing happens when no file is set.
---keep: the waiting ticket outlives this process (call again with the same holder to keep your place).`
+--keep: keep the ticket after acquire, or after run times out waiting for the queue.
+  Call again with the same holder to keep your place.`
 
 const opts = {
   dir: { type: "string" }, resource: { type: "string" }, holder: { type: "string" }, purpose: { type: "string" },
@@ -125,33 +126,44 @@ async function main(): Promise<number> {
       const flockFile = flockKind ? flockFor(flockKind) : null
       // Old callers that still use the flock file directly must not overlap with this command.
       const shared = flockKind === "build" && !values.exclusive
-      const runCmd = flockFile ? ["flock", shared ? "-s" : "-x", "-E", "75", "-w", String(numArg("wait", 900)), flockFile, ...cmd] : cmd
+      const waitSec = numArg("wait", 900)
+      const runCmd = flockFile ? ["flock", shared ? "-s" : "-x", "-E", "75", "-w", String(waitSec), flockFile, ...cmd] : cmd
       const owner = who()
       const maxHold = numArg("max-hold")
       const keep = !!values.keep
       const ac = new AbortController()
       for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => ac.abort())
-      let r = store.acquire({
+      let r = store.acquireRun({
         resource: need("resource"), holder: owner.holder!, purpose: str("purpose") ?? cmd.join(" ").slice(0, 200),
         max_hold_sec: maxHold + 30, nick: str("nick"), session_id: owner.sessionID, exclusive: !!values.exclusive,
-        preconditions: preconditions(), owner_pid: keep ? null : process.pid,
+        preconditions: preconditions(),
       })
-      if (r.status === "waiting") {
-        say(describe(r))
-        r = await store.wait(r.ticket.id, numArg("wait", 900), owner, ac.signal)
-      }
-      if (r.status !== "granted") {
-        if (r.status === "waiting" && !keep) store.cancel(r.ticket.id, owner)
-        say(r.status === "waiting" ? `${describe(r)}; not granted yet, call again${keep ? " with the same holder" : ""}` : describe(r))
-        return r.status === "waiting" ? 75 : 1
-      }
-      say(`ticket ${r.ticket.id}: granted, running`)
+      const id = r.ticket.id
+      let keptForRetry = false
       try {
-        const { code, timedOut } = await runHeld(store, r.ticket.id, owner, { cmd: runCmd, maxHoldSec: maxHold, signal: ac.signal })
+        if (r.status === "waiting") {
+          say(describe(r))
+          r = await store.wait(id, waitSec, owner, ac.signal)
+        }
+        if (ac.signal.aborted) {
+          say(`ticket ${id}: interrupted`)
+          return 1
+        }
+        if (r.status !== "granted") {
+          if (r.status === "waiting" && keep) {
+            store.keepRunForRetry(id, owner)
+            keptForRetry = true
+          }
+          say(r.status === "waiting" ? `${describe(r)}; not granted yet, call again${keep ? " with the same holder" : ""}` : describe(r))
+          return exitFor(r)
+        }
+        say(`ticket ${id}: granted, running`)
+        const { code, timedOut } = await runHeld(store, id, owner, { cmd: runCmd, maxHoldSec: maxHold, signal: ac.signal })
         if (timedOut) say(`command passed max hold time ${maxHold} s and was stopped`)
         return code
       } finally {
-        store.release(r.ticket.id, owner)
+        if (r.status === "granted") store.release(id, owner)
+        else if (r.status === "waiting" && !keptForRetry) store.cancel(id, owner)
       }
     }
     default:
